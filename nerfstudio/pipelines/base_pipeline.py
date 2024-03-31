@@ -367,6 +367,7 @@ class VanillaPipeline(Pipeline):
             TimeElapsedColumn(),
             MofNCompleteColumn(),
             transient=True,
+            # disable=True,
         ) as progress:
             task = progress.add_task("[green]Evaluating all eval images...", total=num_images)
             for camera, batch in self.datamanager.fixed_indices_eval_dataloader:

@@ -44,6 +44,31 @@ from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils.colors import get_color
 from nerfstudio.utils.rich_utils import CONSOLE
 
+from modified_diff_gaussian_rasterization import GaussianRasterizer as ModifiedGaussianRasterizer
+from modified_diff_gaussian_rasterization import GaussianRasterizationSettings
+from diff_gaussian_rasterization import GaussianRasterizer 
+
+def getProjectionMatrix(znear, zfar, fovX, fovY):
+    tanHalfFovY = math.tan((fovY / 2))
+    tanHalfFovX = math.tan((fovX / 2))
+
+    top = tanHalfFovY * znear
+    bottom = -top
+    right = tanHalfFovX * znear
+    left = -right
+
+    P = torch.zeros(4, 4)
+
+    z_sign = 1.0
+
+    P[0, 0] = 2.0 * znear / (right - left)
+    P[1, 1] = 2.0 * znear / (top - bottom)
+    P[0, 2] = (right + left) / (right - left)
+    P[1, 2] = (top + bottom) / (top - bottom)
+    P[3, 2] = z_sign
+    P[2, 2] = z_sign * zfar / (zfar - znear)
+    P[2, 3] = -(zfar * znear) / (zfar - znear)
+    return P
 
 def random_quat_tensor(N):
     """
@@ -789,6 +814,53 @@ class SplatfactoModel(Model):
                 background=torch.zeros(3, device=self.device),
             )[..., 0:1]  # type: ignore
             depth_im = torch.where(alpha > 0, depth_im / alpha, depth_im.detach().max())
+
+        fovx = 2 * torch.atan(camera.width / (2 * camera.fx))
+        fovy = 2 * torch.atan(camera.height / (2 * camera.fy))
+        tanfovx = math.tan(fovx * 0.5)
+        tanfovy = math.tan(fovy * 0.5)
+        bg_color = torch.tensor([0., 0., 0.], dtype=torch.float32, device="cuda")
+        scaling_modifier = 1.
+        projmat = getProjectionMatrix(0.01, 100., fovx, fovy).cuda()
+
+        raster_settings = GaussianRasterizationSettings(
+            image_height=int(camera.height),
+            image_width=int(camera.width),
+            tanfovx=tanfovx,
+            tanfovy=tanfovy,
+            bg=bg_color,
+            scale_modifier=scaling_modifier,
+            viewmatrix=viewmat.t(),
+            projmatrix=viewmat.t() @ projmat.t(),
+            sh_degree=n,
+            campos=viewmat.inverse()[:3, 3],
+            prefiltered=False,
+            debug=False
+        )
+        rasterizer = ModifiedGaussianRasterizer(raster_settings=raster_settings)
+        # rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+
+        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+        screenspace_points = torch.zeros_like(means_crop, dtype=means_crop.dtype, requires_grad=True, device="cuda") + 0
+        try:
+            screenspace_points.retain_grad()
+        except:
+            pass
+
+        rendered_image, radii = rasterizer(
+            means3D=means_crop,
+            means2D=screenspace_points,
+            shs=colors_crop,
+            colors_precomp=None,
+            opacities=opacities,
+            scales=torch.exp(scales_crop),
+            rotations=quats_crop / quats_crop.norm(dim=-1, keepdim=True),
+            cov3D_precomp=None)
+        breakpoint()
+        import matplotlib.pyplot as plt
+        plt.imsave("/mnt/kostas_home/wen/tmp/ns-debug/r0.png", rendered_image.cpu().numpy().transpose(1, 2, 0).clip(0, 1.))
+        plt.imsave("/mnt/kostas_home/wen/tmp/ns-debug/gsplat-r0.png", rgb.cpu().numpy().clip(0, 1.))
+
 
         return {"rgb": rgb, "depth": depth_im, "accumulation": alpha, "background": background}  # type: ignore
 
