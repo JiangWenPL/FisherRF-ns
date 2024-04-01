@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Type, Union
+from typing import Dict, List, Optional, Tuple, Type, Union, Iterable
 
 import numpy as np
 import torch
@@ -45,8 +45,11 @@ from nerfstudio.utils.colors import get_color
 from nerfstudio.utils.rich_utils import CONSOLE
 
 from einops import repeat, reduce, rearrange
-from modified_diff_gaussian_rasterization import GaussianRasterizer as ModifiedGaussianRasterizer
-from modified_diff_gaussian_rasterization import GaussianRasterizationSettings
+# from modified_diff_gaussian_rasterization import GaussianRasterizer as ModifiedGaussianRasterizer
+# from modified_diff_gaussian_rasterization import GaussianRasterizationSettings
+
+from modified_diff_gaussian_rasterization_depth import GaussianRasterizer as ModifiedGaussianRasterizer
+from modified_diff_gaussian_rasterization_depth import GaussianRasterizationSettings
 
 def getProjectionMatrix(znear, zfar, fovX, fovY):
     tanHalfFovY = math.tan((fovY / 2))
@@ -103,6 +106,33 @@ def SH2RGB(sh):
     C0 = 0.28209479177387814
     return sh * C0 + 0.5
 
+
+def equal_hist(uncern):
+    H, W = uncern.shape
+
+    # Histogram equalization for visualization
+    uncern = uncern.flatten()
+    median = np.median(uncern)
+    bins = np.append(np.linspace(uncern.min(), median, len(uncern)), 
+                            np.linspace(median, uncern.max(), len(uncern)))
+    # Do histogram equalization on uncern  
+    # bins = np.linspace(uncern.min(), uncern.max(), len(uncern) // 20)
+    hist, bins2 = np.histogram(uncern, bins=bins)
+    # Compute CDF from histogram
+    cdf = np.cumsum(hist, dtype=np.float64)
+    cdf = np.hstack(([0], cdf))
+    cdf = cdf / cdf[-1]
+    # Do equalization
+    binnum = np.digitize(uncern, bins, True) - 1
+    neg = np.where(binnum < 0)
+    binnum[neg] = 0
+    uncern_aeq = cdf[binnum] * bins[-1]
+
+    uncern_aeq = uncern_aeq.reshape(H, W)
+    uncern_aeq = (uncern_aeq - uncern_aeq.min()) / (uncern_aeq.max() - uncern_aeq.min())
+    return uncern_aeq 
+
+to_homo = lambda x: torch.cat([x, torch.ones(x.shape[:-1] + (1, ), dtype=x.dtype, device=x.device)], dim=-1)
 
 @dataclass
 class SplatfactoModelConfig(ModelConfig):
@@ -815,8 +845,9 @@ class SplatfactoModel(Model):
             )[..., 0:1]  # type: ignore
             depth_im = torch.where(alpha > 0, depth_im / alpha, depth_im.detach().max())
 
-        cur_H = self.compute_diag_H(camera)
-        breakpoint()
+        # cur_H = self.compute_diag_H(camera)
+        # self.render_uncertainty([camera], [camera])
+        self.compute_EIG([camera], [camera])
 
         return {"rgb": rgb, "depth": depth_im, "accumulation": alpha, "background": background}  # type: ignore
 
@@ -957,7 +988,7 @@ class SplatfactoModel(Model):
         return metrics_dict, images_dict
 
     @torch.no_grad()
-    def compute_diag_H(self, camera: Cameras) -> Dict[str, Union[torch.Tensor, List]]:
+    def prepare_rasterizer(self, camera: Cameras) -> Tuple[ModifiedGaussianRasterizer, List[torch.Tensor]]:
         """Takes in a Ray Bundle and returns a dictionary of outputs.
 
         Args:
@@ -969,7 +1000,7 @@ class SplatfactoModel(Model):
         """
         if not isinstance(camera, Cameras):
             print("Called get_outputs with not a camera")
-            return {}
+            return {} #type: ignore
         assert camera.shape[0] == 1, "Only one camera at a time"
 
         # get the background color
@@ -988,15 +1019,7 @@ class SplatfactoModel(Model):
             else:
                 background = self.background_color.to(self.device)
 
-        if self.crop_box is not None and not self.training:
-            crop_ids = self.crop_box.within(self.means).squeeze()
-            if crop_ids.sum() == 0:
-                rgb = background.repeat(int(camera.height.item()), int(camera.width.item()), 1)
-                depth = background.new_ones(*rgb.shape[:2], 1) * 10
-                accumulation = background.new_zeros(*rgb.shape[:2], 1)
-                return {"rgb": rgb, "depth": depth, "accumulation": accumulation, "background": background}
-        else:
-            crop_ids = None
+        crop_ids = None
         camera_downscale = self._get_downscale_factor()
         camera.rescale_output_resolution(1 / camera_downscale)
         # shift the camera to center of scene looking at center
@@ -1074,14 +1097,6 @@ class SplatfactoModel(Model):
         rasterizer = ModifiedGaussianRasterizer(raster_settings=raster_settings)
         # rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
-        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-        screenspace_points = torch.zeros_like(means_crop, dtype=means_crop.dtype, requires_grad=True, device="cuda") + 0
-        try:
-            screenspace_points.retain_grad()
-        except:
-            pass
-
-
         # Create temporary varaibles to avoid side effects of the backward engine
         # this also addresses the issues of normalization for quaterions
         means3D = means_crop.clone().requires_grad_(True)
@@ -1093,8 +1108,33 @@ class SplatfactoModel(Model):
 
         params = [means3D, shs, opacities, scales, rotations]
 
+        return rasterizer, params
+
+    
+    @torch.no_grad()
+    def compute_diag_H(self, camera: Cameras):
+        """
+        Compute diagonal hessian, 
+
+        return dict:
+        rgb: rendering from 3D-GS renderer (H, W, C)
+        depth: depth map from 3D-GS renderer (H, W)
+        H: list of diag hessian on gaussians in the order of:
+            means3D, shs, opacities, scales, rotations 
+        """
+        rasterizer, params = self.prepare_rasterizer(camera)
+        means3D, shs, opacities, scales, rotations = params
+
+        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+        screenspace_points = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda") + 0
+        try:
+            screenspace_points.retain_grad()
+        except:
+            pass
+
         with torch.enable_grad():
-            rendered_image, radii = rasterizer(
+            # rendered_image, radii = rasterizer(
+            rendered_image, rendered_depth, radii = rasterizer(
                 means3D=means3D,
                 means2D=screenspace_points,
                 shs=shs,
@@ -1104,15 +1144,89 @@ class SplatfactoModel(Model):
                 rotations=rotations,
                 cov3D_precomp=None)
 
+            # import matplotlib.pyplot as plt
+            # plt.imsave("/mnt/kostas_home/wen/tmp/ns-debug/r0.png", rendered_image.detach().cpu().numpy().transpose(1, 2, 0).clip(0, 1.))
+            # breakpoint()
+
             rendered_image.backward(gradient=torch.ones_like(rendered_image))
 
-            cur_H = torch.cat([p.grad.detach().reshape(-1) for p in params])
+        cur_H = [p.grad.detach().clone() for p in params] #type: ignore
+        for p in params:
+            p.grad = None
 
-        # import matplotlib.pyplot as plt
-        # plt.imsave("/mnt/kostas_home/wen/tmp/ns-debug/r0.png", rendered_image.cpu().numpy().transpose(1, 2, 0).clip(0, 1.))
         # plt.imsave("/mnt/kostas_home/wen/tmp/ns-debug/gsplat-r0.png", rgb.cpu().numpy().clip(0, 1.))
 
         rgb = rearrange(rendered_image, "c h w -> h w c")
 
         # TODO: consider also returns depth_im
-        return {"rgb": rgb, "H": cur_H}  # type: ignore
+        return {"rgb": rgb, "H": cur_H, "depth": rendered_depth}  # type: ignore
+
+    @torch.no_grad()
+    def compute_EIG(self, train_cameras: Iterable[Cameras], candidate_cameras: List[Cameras]) -> torch.Tensor:
+        """
+        compute EIG for single camera
+        """
+        EIG = torch.zeros(len(candidate_cameras), device=candidate_cameras[0].device)
+
+        H_train = None
+
+        for train_cam in train_cameras:
+            H_info = self.compute_diag_H(train_cam)
+            cur_H_train = torch.cat([p.reshape(-1) for p in H_info["H"]])
+            H_train = H_train + cur_H_train if H_train is not None else cur_H_train
+
+        REG_LAMBDA = 1e-6 # NOTE: might need to adjust this regularizer
+        H_inv = torch.reciprocal(H_train + REG_LAMBDA)  #type: ignore
+        for i, candidate_cam in enumerate(candidate_cameras):
+            H_info = self.compute_diag_H(candidate_cam)
+            H_candidate = torch.cat([p.reshape(-1) for p in H_info["H"]])
+            EIG[i] = torch.sum(H_inv * H_candidate) 
+
+        return EIG
+
+    @torch.no_grad()
+    def render_uncertainty(self, train_cameras: Iterable[Cameras], test_cameras: Iterable[Cameras]):
+        H_per_gaussian = torch.zeros(self.opacities.shape[0], device=self.opacities.device, dtype=self.opacities.dtype)
+        for train_cam in train_cameras:
+            H_info = self.compute_diag_H(train_cam)
+            H_per_gaussian += sum([reduce(p, "n ... -> n", "sum") for p in H_info['H']])
+        
+        hessian_color = repeat(H_per_gaussian.detach(), "n -> n c", c=3)
+        uncern_maps = []
+        for test_cam in test_cameras:
+            rasterizer, params = self.prepare_rasterizer(test_cam)
+            means3D, shs, opacities, scales, rotations = params
+
+            # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+            screenspace_points = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda") + 0
+            try:
+                screenspace_points.retain_grad()
+            except:
+                pass
+
+            # cur_H = torch.cat([p.grad.detach().reshape(-1) for p in params]) # type: ignore
+            pts3d_homo = to_homo(means3D)
+            pts3d_cam = pts3d_homo @ rasterizer.raster_settings.viewmatrix
+            gaussian_depths = pts3d_cam[:, 2, None]
+
+            cur_hessian_color = hessian_color * gaussian_depths.clamp(min=0)
+            rendered_image, rendered_depth, radii = rasterizer(
+                means3D=means3D,
+                means2D=screenspace_points,
+                shs=None,
+                colors_precomp=cur_hessian_color,
+                opacities=opacities,
+                scales=scales,
+                rotations=rotations,
+                cov3D_precomp=None)
+            uncern_maps.append(rendered_image[0])
+
+            # log_pix_uncern = torch.log(rendered_image[0]) # C-dim is the same            
+            # import matplotlib.pyplot as plt
+            # import seaborn as sns
+            # sns.heatmap(log_pix_uncern.cpu(), square=True)
+            # plt.savefig("/mnt/kostas_home/wen/tmp/ns-debug/log-uncern.png")
+            # log_pix_uncern = torch.where(rendered_image > 0, torch.log(rendered_image), 0.)
+            # breakpoint()
+
+        return uncern_maps 
