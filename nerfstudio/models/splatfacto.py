@@ -44,9 +44,9 @@ from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils.colors import get_color
 from nerfstudio.utils.rich_utils import CONSOLE
 
+from einops import repeat, reduce, rearrange
 from modified_diff_gaussian_rasterization import GaussianRasterizer as ModifiedGaussianRasterizer
 from modified_diff_gaussian_rasterization import GaussianRasterizationSettings
-from diff_gaussian_rasterization import GaussianRasterizer 
 
 def getProjectionMatrix(znear, zfar, fovX, fovY):
     tanHalfFovY = math.tan((fovY / 2))
@@ -815,52 +815,8 @@ class SplatfactoModel(Model):
             )[..., 0:1]  # type: ignore
             depth_im = torch.where(alpha > 0, depth_im / alpha, depth_im.detach().max())
 
-        fovx = 2 * torch.atan(camera.width / (2 * camera.fx))
-        fovy = 2 * torch.atan(camera.height / (2 * camera.fy))
-        tanfovx = math.tan(fovx * 0.5)
-        tanfovy = math.tan(fovy * 0.5)
-        bg_color = torch.tensor([0., 0., 0.], dtype=torch.float32, device="cuda")
-        scaling_modifier = 1.
-        projmat = getProjectionMatrix(0.01, 100., fovx, fovy).cuda()
-
-        raster_settings = GaussianRasterizationSettings(
-            image_height=int(camera.height),
-            image_width=int(camera.width),
-            tanfovx=tanfovx,
-            tanfovy=tanfovy,
-            bg=bg_color,
-            scale_modifier=scaling_modifier,
-            viewmatrix=viewmat.t(),
-            projmatrix=viewmat.t() @ projmat.t(),
-            sh_degree=n,
-            campos=viewmat.inverse()[:3, 3],
-            prefiltered=False,
-            debug=False
-        )
-        rasterizer = ModifiedGaussianRasterizer(raster_settings=raster_settings)
-        # rasterizer = GaussianRasterizer(raster_settings=raster_settings)
-
-        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-        screenspace_points = torch.zeros_like(means_crop, dtype=means_crop.dtype, requires_grad=True, device="cuda") + 0
-        try:
-            screenspace_points.retain_grad()
-        except:
-            pass
-
-        rendered_image, radii = rasterizer(
-            means3D=means_crop,
-            means2D=screenspace_points,
-            shs=colors_crop,
-            colors_precomp=None,
-            opacities=opacities,
-            scales=torch.exp(scales_crop),
-            rotations=quats_crop / quats_crop.norm(dim=-1, keepdim=True),
-            cov3D_precomp=None)
+        cur_H = self.compute_diag_H(camera)
         breakpoint()
-        import matplotlib.pyplot as plt
-        plt.imsave("/mnt/kostas_home/wen/tmp/ns-debug/r0.png", rendered_image.cpu().numpy().transpose(1, 2, 0).clip(0, 1.))
-        plt.imsave("/mnt/kostas_home/wen/tmp/ns-debug/gsplat-r0.png", rgb.cpu().numpy().clip(0, 1.))
-
 
         return {"rgb": rgb, "depth": depth_im, "accumulation": alpha, "background": background}  # type: ignore
 
@@ -999,3 +955,164 @@ class SplatfactoModel(Model):
         images_dict = {"img": combined_rgb}
 
         return metrics_dict, images_dict
+
+    @torch.no_grad()
+    def compute_diag_H(self, camera: Cameras) -> Dict[str, Union[torch.Tensor, List]]:
+        """Takes in a Ray Bundle and returns a dictionary of outputs.
+
+        Args:
+            ray_bundle: Input bundle of rays. This raybundle should have all the
+            needed information to compute the outputs.
+
+        Returns:
+            Outputs of model. (ie. rendered colors)
+        """
+        if not isinstance(camera, Cameras):
+            print("Called get_outputs with not a camera")
+            return {}
+        assert camera.shape[0] == 1, "Only one camera at a time"
+
+        # get the background color
+        if self.training:
+            if self.config.background_color == "random":
+                background = torch.rand(3, device=self.device)
+            elif self.config.background_color == "white":
+                background = torch.ones(3, device=self.device)
+            elif self.config.background_color == "black":
+                background = torch.zeros(3, device=self.device)
+            else:
+                background = self.background_color.to(self.device)
+        else:
+            if renderers.BACKGROUND_COLOR_OVERRIDE is not None:
+                background = renderers.BACKGROUND_COLOR_OVERRIDE.to(self.device)
+            else:
+                background = self.background_color.to(self.device)
+
+        if self.crop_box is not None and not self.training:
+            crop_ids = self.crop_box.within(self.means).squeeze()
+            if crop_ids.sum() == 0:
+                rgb = background.repeat(int(camera.height.item()), int(camera.width.item()), 1)
+                depth = background.new_ones(*rgb.shape[:2], 1) * 10
+                accumulation = background.new_zeros(*rgb.shape[:2], 1)
+                return {"rgb": rgb, "depth": depth, "accumulation": accumulation, "background": background}
+        else:
+            crop_ids = None
+        camera_downscale = self._get_downscale_factor()
+        camera.rescale_output_resolution(1 / camera_downscale)
+        # shift the camera to center of scene looking at center
+        R = camera.camera_to_worlds[0, :3, :3]  # 3 x 3
+        T = camera.camera_to_worlds[0, :3, 3:4]  # 3 x 1
+        # flip the z and y axes to align with gsplat conventions
+        R_edit = torch.diag(torch.tensor([1, -1, -1], device=self.device, dtype=R.dtype))
+        R = R @ R_edit
+        # analytic matrix inverse to get world2camera matrix
+        R_inv = R.T
+        T_inv = -R_inv @ T
+        viewmat = torch.eye(4, device=R.device, dtype=R.dtype)
+        viewmat[:3, :3] = R_inv
+        viewmat[:3, 3:4] = T_inv
+        # calculate the FOV of the camera given fx and fy, width and height
+        cx = camera.cx.item()
+        cy = camera.cy.item()
+        W, H = int(camera.width.item()), int(camera.height.item())
+        self.last_size = (H, W)
+
+        if crop_ids is not None:
+            opacities_crop = self.opacities[crop_ids]
+            means_crop = self.means[crop_ids]
+            features_dc_crop = self.features_dc[crop_ids]
+            features_rest_crop = self.features_rest[crop_ids]
+            scales_crop = self.scales[crop_ids]
+            quats_crop = self.quats[crop_ids]
+        else:
+            opacities_crop = self.opacities
+            means_crop = self.means
+            features_dc_crop = self.features_dc
+            features_rest_crop = self.features_rest
+            scales_crop = self.scales
+            quats_crop = self.quats
+
+        colors_crop = torch.cat((features_dc_crop[:, None, :], features_rest_crop), dim=1)
+        BLOCK_WIDTH = 16  # this controls the tile size of rasterization, 16 is a good default
+
+        # rescale the camera back to original dimensions before returning
+        camera.rescale_output_resolution(camera_downscale)
+
+        if self.config.sh_degree > 0:
+            viewdirs = means_crop.detach() - camera.camera_to_worlds.detach()[..., :3, 3]  # (N, 3)
+            viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
+            n = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
+            rgbs = spherical_harmonics(n, viewdirs, colors_crop)
+            rgbs = torch.clamp(rgbs + 0.5, min=0.0)  # type: ignore
+        else:
+            rgbs = torch.sigmoid(colors_crop[:, 0, :])
+
+        opacities = torch.sigmoid(opacities_crop)
+
+        fovx = 2 * torch.atan(camera.width / (2 * camera.fx))
+        fovy = 2 * torch.atan(camera.height / (2 * camera.fy))
+        tanfovx = math.tan(fovx * 0.5)
+        tanfovy = math.tan(fovy * 0.5)
+        bg_color = torch.tensor([0., 0., 0.], dtype=torch.float32, device="cuda")
+        scaling_modifier = 1.
+        projmat = getProjectionMatrix(0.01, 100., fovx, fovy).cuda()
+
+        raster_settings = GaussianRasterizationSettings(
+            image_height=int(camera.height),
+            image_width=int(camera.width),
+            tanfovx=tanfovx,
+            tanfovy=tanfovy,
+            bg=bg_color,
+            scale_modifier=scaling_modifier,
+            viewmatrix=viewmat.t(),
+            projmatrix=viewmat.t() @ projmat.t(),
+            sh_degree=n,
+            campos=viewmat.inverse()[:3, 3],
+            prefiltered=False,
+            debug=False
+        )
+        rasterizer = ModifiedGaussianRasterizer(raster_settings=raster_settings)
+        # rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+
+        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+        screenspace_points = torch.zeros_like(means_crop, dtype=means_crop.dtype, requires_grad=True, device="cuda") + 0
+        try:
+            screenspace_points.retain_grad()
+        except:
+            pass
+
+
+        # Create temporary varaibles to avoid side effects of the backward engine
+        # this also addresses the issues of normalization for quaterions
+        means3D = means_crop.clone().requires_grad_(True)
+        shs = colors_crop.clone().requires_grad_(True)
+        opacities = opacities.clone().requires_grad_(True)
+        scales = torch.exp(scales_crop.clone()).requires_grad_(True)
+        rotations = quats_crop / quats_crop.norm(dim=-1, keepdim=True)
+        rotations.requires_grad_(True)
+
+        params = [means3D, shs, opacities, scales, rotations]
+
+        with torch.enable_grad():
+            rendered_image, radii = rasterizer(
+                means3D=means3D,
+                means2D=screenspace_points,
+                shs=shs,
+                colors_precomp=None,
+                opacities=opacities,
+                scales=scales,
+                rotations=rotations,
+                cov3D_precomp=None)
+
+            rendered_image.backward(gradient=torch.ones_like(rendered_image))
+
+            cur_H = torch.cat([p.grad.detach().reshape(-1) for p in params])
+
+        # import matplotlib.pyplot as plt
+        # plt.imsave("/mnt/kostas_home/wen/tmp/ns-debug/r0.png", rendered_image.cpu().numpy().transpose(1, 2, 0).clip(0, 1.))
+        # plt.imsave("/mnt/kostas_home/wen/tmp/ns-debug/gsplat-r0.png", rgb.cpu().numpy().clip(0, 1.))
+
+        rgb = rearrange(rendered_image, "c h w -> h w c")
+
+        # TODO: consider also returns depth_im
+        return {"rgb": rgb, "H": cur_H}  # type: ignore
