@@ -845,9 +845,12 @@ class SplatfactoModel(Model):
             )[..., 0:1]  # type: ignore
             depth_im = torch.where(alpha > 0, depth_im / alpha, depth_im.detach().max())
 
+        # Test entries
         # cur_H = self.compute_diag_H(camera)
         # self.render_uncertainty([camera], [camera])
-        self.compute_EIG([camera], [camera])
+
+        # Example
+        # self.compute_EIG([camera], [camera])
 
         return {"rgb": rgb, "depth": depth_im, "accumulation": alpha, "background": background}  # type: ignore
 
