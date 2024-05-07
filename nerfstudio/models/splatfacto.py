@@ -187,6 +187,12 @@ class SplatfactoModelConfig(ModelConfig):
     """maximum degree of spherical harmonics to use"""
     use_scale_regularization: bool = False
     """If enabled, a scale regularization introduced in PhysGauss (https://xpandora.github.io/PhysGaussian/) is used for reducing huge spikey gaussians."""
+    render_uncertainty: bool = False
+    """whether or not to render uncertainty during GS training. NOTE: This will slow down training significantly."""
+    depth_uncertainty_weight: float = 1.0
+    """weight of depth uncertainty with the Hessian"""
+    rgb_uncertainty_weight: float = 1.0
+    """weight of rgb uncertainty with the Hessian"""
     max_gauss_ratio: float = 10.0
     """threshold of ratio of gaussian max to min scale before applying regularization
     loss from the PhysGaussian paper
@@ -852,43 +858,39 @@ class SplatfactoModel(Model):
             )[..., 0:1]  # type: ignore
             depth_im = torch.where(alpha > 0, depth_im / alpha, depth_im.detach().max())
 
-        # cur_H = self.compute_diag_H(camera)
         # param_names = ['means3D', 'shs', 'opacities', 'scales', 'rotations']
-        # for idx, H in enumerate(cur_H['H']):
-        #     print(H.shape, param_names[idx])
         # render uncertainty for one camera
+        rgb_weight = self.config.rgb_uncertainty_weight
+        depth_weight = self.config.depth_uncertainty_weight
         
-        uncertainties = self.render_uncertainty_depth([camera], [camera])
-        depth_uncertainty = uncertainties[0].unsqueeze(2)
-        
+        if self.config.render_uncertainty:
+            uncertainties = self.render_uncertainty_rgb_depth([camera], [camera], rgb_weight=rgb_weight, depth_weight=depth_weight)
+            uncertainty = uncertainties[0].unsqueeze(2)
         
         if self.training and self.step % 1000 == 0:
-            pass
-            # H_info = self.compute_diag_H(camera)
-            # uncertainty_np = depth_uncertainty.cpu().numpy()
-            # plt.imshow(uncertainty_np)
-            # plt.savefig(f"depth_uncertainty{self.step}.png")     
+            uncertainties = self.render_uncertainty_rgb_depth([camera], [camera], rgb_weight=rgb_weight, depth_weight=depth_weight)
+            uncertainty = uncertainties[0].unsqueeze(2)
             
-            # rgb_np = rgb.clone().cpu()
-            # rgb_np = rgb_np.detach().numpy()
+            uncertainty_np = uncertainty.cpu().numpy()
+            plt.imshow(uncertainty_np)
+            plt.savefig(f"uncertainty{self.step}.png")     
             
-            # plt.imshow(rgb_np)
-            # plt.savefig(f"rgb{self.step}.png")
+            rgb_np = rgb.clone().cpu()
+            rgb_np = rgb_np.detach().numpy()
             
-            # depth_np = depth_im.clone().cpu() #type: ignore
-            # depth_np = depth_np.detach().numpy()
+            plt.imshow(rgb_np)
+            plt.savefig(f"rgb{self.step}.png")
             
-            # plt.imshow(depth_np)
-            # plt.savefig(f"depth_{self.step}.png")
+            depth_np = depth_im.clone().cpu() #type: ignore
+            depth_np = depth_np.detach().numpy()
             
-            # Hessian = H_info['H']
-            # EIG = self.compute_EIG_GS([camera], [camera])
-            # param_names = ['means3D', 'shs', 'scales', 'rotations', 'opacities']
-            # for idx, H in enumerate(Hessian):
-            #     print(H.shape, param_names[idx])
+            plt.imshow(depth_np)
+            plt.savefig(f"depth_{self.step}.png")
             
-        return {"rgb": rgb, "depth": depth_im, "accumulation": alpha, "background": background, "uncertainty": depth_uncertainty}  # type: ignore
-        # return {"rgb": rgb, "depth": depth_im, "accumulation": alpha, "background": background}  # type: ignore
+        if self.config.render_uncertainty:
+            return {"rgb": rgb, "depth": depth_im, "accumulation": alpha, "background": background, "uncertainty": uncertainty} # type: ignore
+        else:
+            return {"rgb": rgb, "depth": depth_im, "accumulation": alpha, "background": background}  # type: ignore
     
     def compute_gradient(self, camera_: Cameras, is_rgb=True):
         """_summary_
@@ -1311,15 +1313,15 @@ class SplatfactoModel(Model):
         return rasterizer, params
 
     @torch.no_grad()
-    def compute_diag_H(self, camera: Cameras, compute_rgb_H=False):
+    def compute_diag_H_rgb_depth(self, camera: Cameras, compute_rgb_H=False):
         """
-        Compute diagonal hessian, 
+        Compute diagonal hessian, on rgb or depth.
 
         return dict:
         rgb: rendering from 3D-GS renderer (H, W, C)
         depth: depth map from 3D-GS renderer (H, W)
         H: list of diag hessian on gaussians in the order of:
-            means3D, shs, opacities, scales, rotations 
+            means3D, shs, opacities, scales, rotations
         """
         rasterizer, params = self.prepare_rasterizer(camera)
         means3D, shs, opacities, scales, rotations = params
@@ -1342,68 +1344,19 @@ class SplatfactoModel(Model):
                 scales=scales,
                 rotations=rotations,
                 cov3D_precomp=None)
-
-            rendered_image.backward(gradient=torch.ones_like(rendered_image))
-            # rendered_depth.backward(gradient=torch.ones_like(rendered_depth))
-            
+            if compute_rgb_H:
+                rendered_image.backward(gradient=torch.ones_like(rendered_image))
+            else:
+                rendered_depth.backward(gradient=torch.ones_like(rendered_depth))
             
         cur_H = [p.grad.detach().clone() for p in params] #type: ignore
             
         for p in params:
             p.grad = None
-
-        # plt.imsave("/mnt/kostas_home/wen/tmp/ns-debug/gsplat-r0.png", rgb.cpu().numpy().clip(0, 1.))
-
+            
         rgb = rearrange(rendered_image, "c h w -> h w c")
-        
-        # TODO: consider also returns depth_im
+
         return {"rgb": rgb, "H": cur_H, "depth": rendered_depth}  # type: ignore
-
-
-    @torch.no_grad()
-    def compute_diag_H_depth(self, camera: Cameras, compute_rgb_H=False):
-        """
-        Compute diagonal hessian, 
-
-        return dict:
-        rgb: rendering from 3D-GS renderer (H, W, C)
-        depth: depth map from 3D-GS renderer (H, W)
-        H: list of diag hessian on gaussians in the order of:
-            means3D, shs, opacities, scales, rotations 
-        """
-        rasterizer, params = self.prepare_rasterizer(camera)
-        means3D, shs, opacities, scales, rotations = params
-
-        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-        screenspace_points = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda") + 0
-        try:
-            screenspace_points.retain_grad()
-        except:
-            pass
-
-        with torch.enable_grad():
-            # rendered_image, radii = rasterizer(
-            rendered_image, rendered_depth, radii = rasterizer(
-                means3D=means3D,
-                means2D=screenspace_points,
-                shs=shs,
-                colors_precomp=None,
-                opacities=opacities,
-                scales=scales,
-                rotations=rotations,
-                cov3D_precomp=None)
-            rendered_depth.backward(gradient=torch.ones_like(rendered_depth))
-            
-        cur_H = [p.grad.detach().clone() for p in params] #type: ignore
-        
-            
-        for p in params:
-            p.grad = None
-
-        # plt.imsave("/mnt/kostas_home/wen/tmp/ns-debug/gsplat-r0.png", rgb.cpu().numpy().clip(0, 1.))
-
-        # TODO: consider also returns depth_im
-        return {"H": cur_H, "depth": rendered_depth}  # type: ignore
 
 
     @torch.no_grad()
@@ -1416,14 +1369,14 @@ class SplatfactoModel(Model):
         H_train = None
 
         for train_cam in train_cameras:
-            H_info = self.compute_diag_H(train_cam)
+            H_info = self.compute_diag_H_rgb_depth(train_cam)
             cur_H_train = torch.cat([p.reshape(-1) for p in H_info["H"]])
             H_train = H_train + cur_H_train if H_train is not None else cur_H_train
 
         REG_LAMBDA = 1e-6 # NOTE: might need to adjust this regularizer
         H_inv = torch.reciprocal(H_train + REG_LAMBDA)  #type: ignore
         for i, candidate_cam in enumerate(candidate_cameras):
-            H_info = self.compute_diag_H(candidate_cam)
+            H_info = self.compute_diag_H_rgb_depth(candidate_cam)
             H_candidate = torch.cat([p.reshape(-1) for p in H_info["H"]])
             EIG[i] = torch.sum(H_inv * H_candidate) 
 
@@ -1431,63 +1384,21 @@ class SplatfactoModel(Model):
     
     
     @torch.no_grad()
-    def render_uncertainty_depth(self, train_cameras: Iterable[Cameras], test_cameras: Iterable[Cameras]):
+    def render_uncertainty_rgb_depth(self, train_cameras: Iterable[Cameras], test_cameras: Iterable[Cameras], rgb_weight=1.0, depth_weight=1.0):
         H_per_gaussian = torch.zeros(self.opacities.shape[0], device=self.opacities.device, dtype=self.opacities.dtype)
-        for train_cam in train_cameras:
-            H_info = self.compute_diag_H_depth(train_cam)
-            H_per_gaussian += sum([reduce(p, "n ... -> n", "sum") for p in H_info['H']])
         
-        hessian_color = repeat(H_per_gaussian.detach(), "n -> n c", c=3)
-        uncern_maps = []
-        for test_cam in test_cameras:
-            rasterizer, params = self.prepare_rasterizer(test_cam)
-            means3D, shs, opacities, scales, rotations = params
-
-            # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-            screenspace_points = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda") + 0
-            try:
-                screenspace_points.retain_grad()
-            except:
-                pass
-
-            # cur_H = torch.cat([p.grad.detach().reshape(-1) for p in params]) # type: ignore
-            pts3d_homo = to_homo(means3D)
-            pts3d_cam = pts3d_homo @ rasterizer.raster_settings.viewmatrix
-            gaussian_depths = pts3d_cam[:, 2, None]
-
-            cur_hessian_color = hessian_color * gaussian_depths.clamp(min=0)
-            rendered_image, rendered_depth, radii = rasterizer(
-                means3D=means3D,
-                means2D=screenspace_points,
-                shs=None,
-                colors_precomp=cur_hessian_color,
-                opacities=opacities,
-                scales=scales,
-                rotations=rotations,
-                cov3D_precomp=None)
-            
-            # denormalize by rendered_depth
-            rendered_image[0] = rendered_image[0]
-            uncern_maps.append(rendered_image[0])
-
-            # log_pix_uncern = torch.log(rendered_image[0]) # C-dim is the same            
-            # import matplotlib.pyplot as plt
-            # import seaborn as sns
-            # sns.heatmap(log_pix_uncern.cpu(), square=True)
-            # plt.savefig("/mnt/kostas_home/wen/tmp/ns-debug/log-uncern.png")
-            # log_pix_uncern = torch.where(rendered_image > 0, torch.log(rendered_image), 0.)
-            # breakpoint()
-
-        return uncern_maps 
-    
-    
-
-    @torch.no_grad()
-    def render_uncertainty(self, train_cameras: Iterable[Cameras], test_cameras: Iterable[Cameras]):
-        H_per_gaussian = torch.zeros(self.opacities.shape[0], device=self.opacities.device, dtype=self.opacities.dtype)
+        # go through provided training cameras
         for train_cam in train_cameras:
-            H_info = self.compute_diag_H(train_cam)
-            H_per_gaussian += sum([reduce(p, "n ... -> n", "sum") for p in H_info['H']])
+            # get rgb uncertainty
+            H_info_rgb = self.compute_diag_H_rgb_depth(train_cam, compute_rgb_H=True)
+            H_info_rgb['H'] = [p * rgb_weight for p in H_info_rgb['H']]
+            H_per_gaussian += sum([reduce(p, "n ... -> n", "sum") for p in H_info_rgb['H']])
+        
+            # get depth uncertainty
+            H_info_depth = self.compute_diag_H_rgb_depth(train_cam, compute_rgb_H=False)
+            H_info_depth['H'] = [p * depth_weight for p in H_info_depth['H']]
+            H_per_gaussian += sum([reduce(p, "n ... -> n", "sum") for p in H_info_depth['H']])
+        
         
         hessian_color = repeat(H_per_gaussian.detach(), "n -> n c", c=3)
         uncern_maps = []
