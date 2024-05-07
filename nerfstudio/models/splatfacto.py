@@ -852,55 +852,34 @@ class SplatfactoModel(Model):
             )[..., 0:1]  # type: ignore
             depth_im = torch.where(alpha > 0, depth_im / alpha, depth_im.detach().max())
 
-        # Test entries
         # cur_H = self.compute_diag_H(camera)
         # param_names = ['means3D', 'shs', 'opacities', 'scales', 'rotations']
         # for idx, H in enumerate(cur_H['H']):
         #     print(H.shape, param_names[idx])
         # render uncertainty for one camera
         
-        # if self.step % 1000 == 0:
-        #     uncertainties = self.render_uncertainty([camera], [camera])
-            
-            # for uncertainty in uncertainties:
-            #     # save fig
-            #     rgb_uncertainty = uncertainties[0].unsqueeze(2)
-            #     uncertainty_np = rgb_uncertainty.cpu().numpy()
-            #     plt.imshow(uncertainty_np)
-            #     plt.savefig(f"prism_uncertainty_{self.step}.png")     
-            #     rgb_np = rgb.clone().cpu()
-            #     rgb_np = rgb_np.detach().numpy()
-                
-            #     plt.imshow(rgb_np)
-            #     plt.savefig(f"prism_rgb_{self.step}.png")
-                
-            #     depth_np = depth_im.clone().cpu() #type: ignore
-            #     depth_np = depth_np.detach().numpy()
-                
-            #     plt.imshow(depth_np)
-            #     plt.savefig(f"prism_depth_{self.step}.png")
         uncertainties = self.render_uncertainty_depth([camera], [camera])
         depth_uncertainty = uncertainties[0].unsqueeze(2)
         
         
         if self.training and self.step % 1000 == 0:
-            
+            pass
             # H_info = self.compute_diag_H(camera)
-            uncertainty_np = depth_uncertainty.cpu().numpy()
-            plt.imshow(uncertainty_np)
-            plt.savefig(f"depth_uncertainty{self.step}.png")     
+            # uncertainty_np = depth_uncertainty.cpu().numpy()
+            # plt.imshow(uncertainty_np)
+            # plt.savefig(f"depth_uncertainty{self.step}.png")     
             
-            rgb_np = rgb.clone().cpu()
-            rgb_np = rgb_np.detach().numpy()
+            # rgb_np = rgb.clone().cpu()
+            # rgb_np = rgb_np.detach().numpy()
             
-            plt.imshow(rgb_np)
-            plt.savefig(f"rgb{self.step}.png")
+            # plt.imshow(rgb_np)
+            # plt.savefig(f"rgb{self.step}.png")
             
-            depth_np = depth_im.clone().cpu() #type: ignore
-            depth_np = depth_np.detach().numpy()
+            # depth_np = depth_im.clone().cpu() #type: ignore
+            # depth_np = depth_np.detach().numpy()
             
-            plt.imshow(depth_np)
-            plt.savefig(f"depth_{self.step}.png")
+            # plt.imshow(depth_np)
+            # plt.savefig(f"depth_{self.step}.png")
             
             # Hessian = H_info['H']
             # EIG = self.compute_EIG_GS([camera], [camera])
@@ -1414,7 +1393,6 @@ class SplatfactoModel(Model):
                 rotations=rotations,
                 cov3D_precomp=None)
             rendered_depth.backward(gradient=torch.ones_like(rendered_depth))
-        #     # rendered_depth.backward(gradient=torch.ones_like(rendered_depth))
             
         cur_H = [p.grad.detach().clone() for p in params] #type: ignore
         
