@@ -124,6 +124,14 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         # Some logic to make sure we sample every camera in equal amounts
         self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
+        
+        # take a small subset of train images
+        # self.train_unseen_cameras_subset = random.sample(self.train_unseen_cameras, 4)
+        
+        self.train_unseen_cameras_subset = [1, 10, 15, 20, 25, 30]
+        self.original_subset = deepcopy(self.train_unseen_cameras_subset)
+        
+        
         self.eval_unseen_cameras = [i for i in range(len(self.eval_dataset))]
         assert len(self.train_unseen_cameras) > 0, "No data found in dataset"
 
@@ -304,8 +312,13 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
     def next_train(self, step: int) -> Tuple[Cameras, Dict]:
         """Returns the next training batch
+        
+        In the case of GS, takes one camera and image pair.
 
         Returns a Camera instead of raybundle"""
+
+        # take n random images
+        
         image_idx = self.train_unseen_cameras.pop(random.randint(0, len(self.train_unseen_cameras) - 1))
         # Make sure to re-populate the unseen cameras list if we have exhausted it
         if len(self.train_unseen_cameras) == 0:
@@ -320,6 +333,34 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             camera.metadata = {}
         camera.metadata["cam_idx"] = image_idx
         return camera, data
+    
+    def next_train_subset(self, step: int) -> Tuple[Cameras, Dict]:
+        """Returns the next training batch
+
+        Returns a Camera instead of raybundle"""
+        image_idx = self.train_unseen_cameras_subset.pop(random.randint(0, len(self.train_unseen_cameras_subset) - 1))
+        # Make sure to re-populate the unseen cameras list if we have exhausted it
+        if len(self.train_unseen_cameras_subset) == 0:
+            self.train_unseen_cameras_subset = deepcopy(self.original_subset)
+        data = deepcopy(self.cached_train[image_idx])
+        data["image"] = data["image"].to(self.device)
+
+        assert len(self.train_dataset.cameras.shape) == 1, "Assumes single batch dimension"
+        camera = self.train_dataset.cameras[image_idx : image_idx + 1].to(self.device)
+        if camera.metadata is None:
+            camera.metadata = {}
+        camera.metadata["cam_idx"] = image_idx
+        return camera, data
+    
+    def get_train_views_not_in_subset(self):
+        """Get the views not in the subset"""
+        
+        difference = list(set(self.train_unseen_cameras) - set(self.original_subset))
+        return difference
+    
+    def add_new_view(self, idx: int) -> None:
+        self.original_subset.append(idx)
+        self.train_unseen_cameras_subset.append(idx)
 
     def next_eval(self, step: int) -> Tuple[Cameras, Dict]:
         """Returns the next evaluation batch

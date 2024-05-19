@@ -17,6 +17,7 @@ Abstracts for the Pipeline class.
 """
 from __future__ import annotations
 
+import random
 import typing
 from abc import abstractmethod
 from dataclasses import dataclass, field
@@ -140,7 +141,6 @@ class Pipeline(nn.Module):
         model_outputs = self.model(ray_bundle, batch)
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
-
         return model_outputs, loss_dict, metrics_dict
 
     @profiler.time_function
@@ -286,6 +286,29 @@ class VanillaPipeline(Pipeline):
     def device(self):
         """Returns the device that the model is on."""
         return self.model.device
+    
+    
+    def fisher_single_view(self, views: List[int]):
+        # construct initial Hessian matrix from the current training data
+        
+        
+        
+        for view in views:
+            # get full camera from view idx
+            pass
+    
+    def view_selection(self, views: List[int], option='random'):
+        if option == 'random':
+            return random.choice(views)
+        elif option == "fisher-single-view":
+            # use fisher information to select the next view
+            return random.choice(views)
+        elif option == "fisher-multi-view":
+            # batch fisher information to select the next views
+            return views[0]
+        else:
+            # select the first view in list. Not recommended.
+            return views[0]
 
     @profiler.time_function
     def get_train_loss_dict(self, step: int):
@@ -296,11 +319,29 @@ class VanillaPipeline(Pipeline):
         Args:
             step: current iteration step to update sampler if using DDP (distributed)
         """
-        ray_bundle, batch = self.datamanager.next_train(step)
+        # this is where GS inference is
+        if step % 100 == 0:
+            # add a new view every 1000 steps
+            views = self.datamanager.get_train_views_not_in_subset()
+            if len(views) != 0:
+                # select a random view
+                new_view = self.view_selection(views)
+                print('Adding view', new_view)
+                self.datamanager.add_new_view(idx = new_view)
+        
+        ray_bundle, batch = self.datamanager.next_train_subset(step)
+        
+        
+        # in the case of GS, ray_bundle is a camera
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
+        
+        if hasattr(self.model, 'ye') and callable(getattr(self.model, 'ye')):
+            pass
 
+        
+        
         return model_outputs, loss_dict, metrics_dict
 
     def forward(self):
