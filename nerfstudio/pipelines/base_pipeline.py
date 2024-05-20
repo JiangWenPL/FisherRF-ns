@@ -41,6 +41,8 @@ from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttrib
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import profiler
 
+from einops import repeat, reduce, rearrange
+
 
 def module_wrapper(ddp_or_model: Union[DDP, Model]) -> Model:
     """
@@ -319,30 +321,35 @@ class VanillaPipeline(Pipeline):
         Args:
             step: current iteration step to update sampler if using DDP (distributed)
         """
-        # this is where GS inference is
-        if step % 100 == 0:
-            # add a new view every 1000 steps
-            views = self.datamanager.get_train_views_not_in_subset()
-            if len(views) != 0:
-                # select a random view
-                new_view = self.view_selection(views)
-                print('Adding view', new_view)
-                self.datamanager.add_new_view(idx = new_view)
+        # location of GS inference
+        rgb_weight = 1.0
+        depth_weight = 1.0
         
         ray_bundle, batch = self.datamanager.next_train_subset(step)
-        
         
         # in the case of GS, ray_bundle is a camera
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
-        if hasattr(self.model, 'ye') and callable(getattr(self.model, 'ye')):
-            pass
-
-        
+        # check uncertainty and selct new views every 1000 steps
+        if step % 1000 == 999:
+            H = self.compute_hessian(ray_bundle, rgb_weight, depth_weight)
         
         return model_outputs, loss_dict, metrics_dict
+    
+    
+    def compute_hessian(self, ray_bundle, rgb_weight, depth_weight):
+        if hasattr(self.model, 'compute_diag_H_rgb_depth') and callable(getattr(self.model, 'compute_diag_H_rgb_depth')):
+            # compute the Hessian
+            H_info_rgb = self.model.compute_diag_H_rgb_depth(ray_bundle, compute_rgb_H=True) # type: ignore
+            H_info_rgb['H'] = [p * rgb_weight for p in H_info_rgb['H']]
+            H_per_gaussian = sum([reduce(p, "n ... -> n", "sum") for p in H_info_rgb['H']])
+            
+            H_info_depth = self.model.compute_diag_H_rgb_depth(ray_bundle, compute_rgb_H=False) # type: ignore
+            H_info_depth['H'] = [p * depth_weight for p in H_info_depth['H']]
+            H_per_gaussian += sum([reduce(p, "n ... -> n", "sum") for p in H_info_depth['H']])
+            return H_per_gaussian   
 
     def forward(self):
         """Blank forward method

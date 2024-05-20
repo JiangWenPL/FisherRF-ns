@@ -129,7 +129,9 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         # self.train_unseen_cameras_subset = random.sample(self.train_unseen_cameras, 4)
         
         self.train_unseen_cameras_subset = [1, 10, 15, 20, 25, 30]
-        self.original_subset = deepcopy(self.train_unseen_cameras_subset)
+        self.original_subset = deepcopy(self.train_unseen_cameras)
+        
+        # self.original_subset = deepcopy(self.train_unseen_cameras_subset)
         
         
         self.eval_unseen_cameras = [i for i in range(len(self.eval_dataset))]
