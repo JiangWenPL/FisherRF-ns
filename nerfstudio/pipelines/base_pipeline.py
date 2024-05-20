@@ -293,11 +293,21 @@ class VanillaPipeline(Pipeline):
     def fisher_single_view(self, views: List[int]):
         # construct initial Hessian matrix from the current training data
         
-        
-        
         for view in views:
             # get full camera from view idx
+            # get hessian and combine all hessians of single view.
             pass
+        
+        # invert Hessian
+        # have acq scores as list of size of candidate cameras
+        
+        # go through each candidate camera and calculate the acq score
+        
+        # compute Hessian, add regularization ter if need be
+        # add sum(H(x)) * I(x) to acq score
+        
+        # take max of acq score and return the view idx
+        
     
     def view_selection(self, views: List[int], option='random'):
         if option == 'random':
