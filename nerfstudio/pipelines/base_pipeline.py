@@ -290,10 +290,10 @@ class VanillaPipeline(Pipeline):
         return self.model.device
     
     
-    def fisher_single_view(self, views: List[int]):
+    def fisher_single_view(self, training_views: List[int], candidate_views: List[int]):
         # construct initial Hessian matrix from the current training data
         
-        for view in views:
+        for view in training_views:
             # get full camera from view idx
             # get hessian and combine all hessians of single view.
             pass
