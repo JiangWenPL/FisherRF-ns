@@ -335,7 +335,10 @@ class VanillaPipeline(Pipeline):
         rgb_weight = 1.0
         depth_weight = 1.0
         
-        ray_bundle, batch = self.datamanager.next_train_subset(step)
+        # ray_bundle, batch = self.datamanager.next_train_subset(step)
+        
+        ray_bundle, batch = self.datamanager.next_train(step)
+        
         
         # in the case of GS, ray_bundle is a camera
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
@@ -343,8 +346,14 @@ class VanillaPipeline(Pipeline):
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
         # check uncertainty and selct new views every 1000 steps
-        if step % 1000 == 999:
-            H = self.compute_hessian(ray_bundle, rgb_weight, depth_weight)
+        # if step % 1000 == 999:
+        #     H = self.compute_hessian(ray_bundle, rgb_weight, depth_weight)
+            
+        # if step % 250 == 249:
+        #     # get the next views
+        #     unseen_views  = self.datamanager.get_train_views_not_in_subset()
+        #     next_view = self.view_selection(next_views, option='fisher-single-view')
+        #     self.datamanager.update_current_view(next_view) # type: ignore
         
         return model_outputs, loss_dict, metrics_dict
     

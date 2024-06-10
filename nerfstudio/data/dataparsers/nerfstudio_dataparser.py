@@ -239,13 +239,13 @@ class Nerfstudio(DataParser):
             method=orientation_method,
             center_method=self.config.center_method,
         )
-
+        
         # Scale poses
         scale_factor = 1.0
         if self.config.auto_scale_poses:
             scale_factor /= float(torch.max(torch.abs(poses[:, :3, 3])))
         scale_factor *= self.config.scale_factor
-
+        
         poses[:, :3, 3] *= scale_factor
 
         # Choose image_filenames and poses based on split, but after auto orient and scaling the poses.
@@ -297,7 +297,8 @@ class Nerfstudio(DataParser):
         metadata = {}
         if (camera_type in [CameraType.FISHEYE, CameraType.FISHEYE624]) and (fisheye_crop_radius is not None):
             metadata["fisheye_crop_radius"] = fisheye_crop_radius
-
+        if split == 'test':
+            print(poses[-1], 'test')
         cameras = Cameras(
             fx=fx,
             fy=fy,
@@ -310,7 +311,7 @@ class Nerfstudio(DataParser):
             camera_type=camera_type,
             metadata=metadata,
         )
-
+        
         assert self.downscale_factor is not None
         cameras.rescale_output_resolution(scaling_factor=1.0 / self.downscale_factor)
 

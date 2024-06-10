@@ -62,7 +62,7 @@ class DepthSplatfactoModelConfig(SplatfactoModelConfig):
     """Splatfacto Model Config, nerfstudio's implementation of Gaussian Splatting"""
 
     _target: Type = field(default_factory=lambda: DepthSplatfactoModel)
-    depth_loss_mult: float = 0.001
+    depth_loss_mult: float = 0.01
     """Lambda of the depth loss."""
     is_euclidean_depth: bool = False
     """Whether input depth maps are Euclidean distances (or z-distances)."""
@@ -120,6 +120,7 @@ class DepthSplatfactoModel(SplatfactoModel):
                 metrics_dict["depth_loss"] = torch.Tensor([0.0]).to(self.device)
                 
                 termination_depth = batch["depth_image"].to(self.device)
+                
                 metrics_dict["depth_loss"] = basic_depth_loss(
                     termination_depth, outputs["depth"])
                 
@@ -150,11 +151,10 @@ class DepthSplatfactoModel(SplatfactoModel):
                     * np.interp(self.step, [0, 2000], [0, 0.2])
                     * metrics_dict["depth_ranking"]
                 )
-            
             if "depth_loss" in metrics_dict:
                 loss_dict["depth_loss"] = self.config.depth_loss_mult * metrics_dict["depth_loss"]
-        if self.config.depth_loss_mult >= 0.005:
-            self.config.depth_loss_mult = max(0.005, self.config.depth_loss_mult * 0.9995)
+        # if self.config.depth_loss_mult >= 0.005:
+        #     self.config.depth_loss_mult = max(0.005, self.config.depth_loss_mult * 0.9995)
             
         return loss_dict
 

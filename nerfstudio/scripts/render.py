@@ -857,17 +857,18 @@ class DatasetRender(BaseRender):
                             )
 
                         # Save to file
-                        if is_raw:
-                            with gzip.open(output_path.with_suffix(".npy.gz"), "wb") as f:
-                                np.save(f, output_image)
-                        elif self.image_format == "png":
-                            media.write_image(output_path.with_suffix(".png"), output_image, fmt="png")
-                        elif self.image_format == "jpeg":
-                            media.write_image(
-                                output_path.with_suffix(".jpg"), output_image, fmt="jpeg", quality=self.jpeg_quality
-                            )
-                        else:
-                            raise ValueError(f"Unknown image format {self.image_format}")
+                        if len(output_image.shape) > 1:
+                            if is_raw:
+                                with gzip.open(output_path.with_suffix(".npy.gz"), "wb") as f:
+                                    np.save(f, output_image)
+                            elif self.image_format == "png":
+                                media.write_image(output_path.with_suffix(".png"), output_image, fmt="png")
+                            elif self.image_format == "jpeg":
+                                media.write_image(
+                                    output_path.with_suffix(".jpg"), output_image, fmt="jpeg", quality=self.jpeg_quality
+                                )
+                            else:
+                                raise ValueError(f"Unknown image format {self.image_format}")
 
         table = Table(
             title=None,

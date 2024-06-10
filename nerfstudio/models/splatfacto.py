@@ -24,6 +24,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Type, Union, Iterable
 
+import cv2
 from matplotlib import pyplot as plt
 import numpy as np
 import torch
@@ -227,6 +228,16 @@ class SplatfactoModel(Model):
         **kwargs,
     ):
         self.seed_points = seed_points
+        
+        self.robot_mask = cv2.imread("/home/peasant98/Desktop/3DGS-LIL/panda-data/mask.png", cv2.IMREAD_GRAYSCALE) / 255
+    
+        self.robot_mask = self.robot_mask == 0
+        
+        self.robot_mask = self.robot_mask[..., None]
+        # convert mask to tensor
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.robot_mask = torch.tensor(self.robot_mask, dtype=torch.bool).to(device)
+        
         super().__init__(*args, **kwargs)
 
     def populate_modules(self):
@@ -867,7 +878,8 @@ class SplatfactoModel(Model):
             uncertainties = self.render_uncertainty_rgb_depth([camera], [camera], rgb_weight=rgb_weight, depth_weight=depth_weight)
             uncertainty = uncertainties[0].unsqueeze(2)
         
-        if self.training and self.step % 1000 == 0:
+        # if self.training and self.step % 1000 == 0:
+        if self.training and False:
             uncertainties = self.render_uncertainty_rgb_depth([camera], [camera], rgb_weight=rgb_weight, depth_weight=depth_weight)
             uncertainty = uncertainties[0].unsqueeze(2)
             
@@ -1103,6 +1115,8 @@ class SplatfactoModel(Model):
         """
         gt_img = self.composite_with_background(self.get_gt_img(batch["image"]), outputs["background"])
         pred_img = outputs["rgb"]
+        
+        
 
         # Set masked part of both ground-truth and rendered image to black.
         # This is a little bit sketchy for the SSIM loss.
@@ -1113,6 +1127,13 @@ class SplatfactoModel(Model):
             assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2]
             gt_img = gt_img * mask
             pred_img = pred_img * mask
+            
+        mask = self._downscale_if_required(self.robot_mask)
+        mask = mask.to(self.device)
+        assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2]
+        gt_img = gt_img * mask
+        pred_img = pred_img * mask
+        
 
         Ll1 = torch.abs(gt_img - pred_img).mean()
         simloss = 1 - self.ssim(gt_img.permute(2, 0, 1)[None, ...], pred_img.permute(2, 0, 1)[None, ...])
