@@ -331,20 +331,12 @@ class VanillaPipeline(Pipeline):
         Args:
             step: current iteration step to update sampler if using DDP (distributed)
         """
-        # location of GS inference
-        rgb_weight = 1.0
-        depth_weight = 1.0
-        
         ray_bundle, batch = self.datamanager.next_train_subset(step)
         
         # in the case of GS, ray_bundle is a camera
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
-        
-        # check uncertainty and selct new views every 1000 steps
-        if step % 1000 == 999:
-            H = self.compute_hessian(ray_bundle, rgb_weight, depth_weight)
         
         return model_outputs, loss_dict, metrics_dict
     

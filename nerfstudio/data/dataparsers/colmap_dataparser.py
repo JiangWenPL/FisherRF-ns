@@ -147,6 +147,7 @@ class ColmapDataParser(DataParser):
 
         # Parse frames
         # we want to sort all images based on im_id
+        # import pdb; pdb.set_trace()
         ordered_im_id = sorted(im_id_to_image.keys())
         for im_id in ordered_im_id:
             im_data = im_id_to_image[im_id]
