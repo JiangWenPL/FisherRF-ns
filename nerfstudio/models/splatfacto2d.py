@@ -491,18 +491,20 @@ class Splatfacto2dModel(Model):
             visible_mask = (self.radii > 0).flatten()
             assert self.xys.grad is not None
             grads = self.xys.grad.detach().norm(dim=-1)
+            
             # print(f"grad norm min {grads.min().item()} max {grads.max().item()} mean {grads.mean().item()} size {grads.shape}")
             if self.xys_grad_norm is None:
-                self.xys_grad_norm = grads
-                self.vis_counts = torch.ones_like(self.xys_grad_norm)
-            else:
-                assert self.vis_counts is not None
-                self.vis_counts[visible_mask] = self.vis_counts[visible_mask] + 1
-                self.xys_grad_norm[visible_mask] = grads[visible_mask] + self.xys_grad_norm[visible_mask]
+                self.xys_grad_norm = torch.zeros_like(grads)
+                self.vis_counts = torch.ones_like(grads)
+ 
+            assert self.vis_counts is not None
+            self.vis_counts[visible_mask] = self.vis_counts[visible_mask] + 1
+            self.xys_grad_norm[visible_mask] = grads[visible_mask] + self.xys_grad_norm[visible_mask]
 
             # update the max screen size, as a ratio of number of pixels
             if self.max_2Dsize is None:
                 self.max_2Dsize = torch.zeros_like(self.radii, dtype=torch.float32)
+            
             newradii = self.radii.detach()[visible_mask]
             self.max_2Dsize[visible_mask] = torch.maximum(
                 self.max_2Dsize[visible_mask],
@@ -538,8 +540,11 @@ class Splatfacto2dModel(Model):
                 avg_grad_norm = (self.xys_grad_norm / self.vis_counts) # * 0.5 * max(self.last_size[0], self.last_size[1])
                 high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
                 splits = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
+                
+                # Not in Official Implementation
                 if self.step < self.config.stop_screen_size_at:
                     splits |= (self.max_2Dsize > self.config.split_screen_size).squeeze()
+                
                 splits &= high_grads
                 nsamps = self.config.n_split_samples
                 split_params = self.split_gaussians(splits, nsamps)
@@ -908,6 +913,12 @@ class Splatfacto2dModel(Model):
         predicted_rgb = outputs["render"]
         metrics_dict["psnr"] = self.psnr(predicted_rgb, gt_rgb)
         metrics_dict["gaussian_count"] = self.num_points
+        if self.xys_grad_norm is not None and self.vis_counts is not None:
+            # Official implementation DO NOT use scale
+            avg_grad_norm = (self.xys_grad_norm / self.vis_counts) # * 0.5 * max(self.last_size[0], self.last_size[1])
+            high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
+            metrics_dict["high_grads"] = high_grads.sum().item() / high_grads.shape[0]
+        
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:

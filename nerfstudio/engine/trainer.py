@@ -459,7 +459,6 @@ class Trainer:
         Args:
             step: Current training step.
         """
-
         needs_zero = [
             group for group in self.optimizers.parameters.keys() if step % self.gradient_accumulation_steps[group] == 0
         ]
