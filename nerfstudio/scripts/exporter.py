@@ -32,6 +32,8 @@ import open3d as o3d
 import torch
 import tyro
 from typing_extensions import Annotated, Literal
+from copy import deepcopy
+from tqdm import tqdm
 
 from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.data.datamanagers.base_datamanager import VanillaDataManager
@@ -42,10 +44,63 @@ from nerfstudio.exporter.exporter_utils import collect_camera_poses, generate_po
 from nerfstudio.exporter.marching_cubes import generate_mesh_with_multires_marching_cubes
 from nerfstudio.fields.sdf_field import SDFField  # noqa
 from nerfstudio.models.splatfacto import SplatfactoModel
+from nerfstudio.models.splatfacto2d import Splatfacto2dModel
 from nerfstudio.pipelines.base_pipeline import Pipeline, VanillaPipeline
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.rich_utils import CONSOLE
 
+def focus_point_fn(poses: np.ndarray) -> np.ndarray:
+    """Calculate nearest point to all focal axes in poses."""
+    directions, origins = poses[:, :3, 2:3], poses[:, :3, 3:4]
+    m = np.eye(3) - directions * np.transpose(directions, [0, 2, 1])
+    mt_m = np.transpose(m, [0, 2, 1]) @ m
+    focus_pt = np.linalg.inv(mt_m.mean(0)) @ (mt_m @ origins).mean(0)[:, 0]
+    return focus_pt
+
+def estimate_bounding_sphere(cams):
+    """
+    Estimate the bounding sphere given camera pose
+    """
+    c2ws = np.array([np.linalg.inv(np.asarray(cam.extrinsic)) for cam in cams])
+    poses = c2ws[:,:3,:] @ np.diag([1, -1, -1, 1])
+    center = (focus_point_fn(poses))
+    radius = np.linalg.norm(c2ws[:,:3,3] - center, axis=-1).min()
+    # center = torch.from_numpy(center).float().cuda()
+    print(f"The estimated bounding radius is {radius:.2f}")
+    print(f"Use at least {2.0 * radius:.2f} for depth_trunc")
+
+    return radius
+
+def to_cam_open3d(cam):
+    # shift the camera to center of scene looking at center
+    R = cam.camera_to_worlds[0, :3, :3]  # 3 x 3
+    T = cam.camera_to_worlds[0, :3, 3:4]  # 3 x 1
+
+    # flip the z and y axes to align with gsplat conventions
+    R_edit = torch.diag(torch.tensor([1, -1, -1], device=R.device, dtype=R.dtype))
+    R = R @ R_edit
+    # analytic matrix inverse to get world2camera matrix
+    R_inv = R.T
+    T_inv = -R_inv @ T
+    viewmat = torch.eye(4, device=R.device, dtype=R.dtype)
+    viewmat[:3, :3] = R_inv
+    viewmat[:3, 3:4] = T_inv
+    
+    intrinsic=o3d.camera.PinholeCameraIntrinsic(
+        width = cam.width.item(),
+        height = cam.height.item(),
+        cx = cam.cx.item(),
+        cy = cam.cy.item(), 
+        fx = cam.fx.item(), 
+        fy = cam.fy.item()
+    )
+
+    extrinsic = np.asarray(viewmat.cpu().numpy())
+    camera = o3d.camera.PinholeCameraParameters()
+    camera.extrinsic = extrinsic
+    camera.intrinsic = intrinsic
+
+    return camera
 
 @dataclass
 class Exporter:
@@ -533,67 +588,152 @@ class ExportGaussianSplat(Exporter):
 
         _, pipeline, _, _ = eval_setup(self.load_config)
 
-        assert isinstance(pipeline.model, SplatfactoModel)
+        # Export 3D Gaussian
+        if isinstance(pipeline.model, SplatfactoModel):
+            model: SplatfactoModel = pipeline.model
+            filename = self.output_dir / "splat.ply"
+            count = 0
+            map_to_tensors = OrderedDict()
 
-        model: SplatfactoModel = pipeline.model
+            with torch.no_grad():
+                positions = model.means.cpu().numpy()
+                count = positions.shape[0]
+                n = count
+                map_to_tensors["x"] = positions[:, 0]
+                map_to_tensors["y"] = positions[:, 1]
+                map_to_tensors["z"] = positions[:, 2]
+                map_to_tensors["nx"] = np.zeros(n, dtype=np.float32)
+                map_to_tensors["ny"] = np.zeros(n, dtype=np.float32)
+                map_to_tensors["nz"] = np.zeros(n, dtype=np.float32)
 
-        filename = self.output_dir / "splat.ply"
+                if model.config.sh_degree > 0:
+                    shs_0 = model.shs_0.contiguous().cpu().numpy()
+                    for i in range(shs_0.shape[1]):
+                        map_to_tensors[f"f_dc_{i}"] = shs_0[:, i, None]
 
-        count = 0
-        map_to_tensors = OrderedDict()
+                    # transpose(1, 2) was needed to match the sh order in Inria version
+                    shs_rest = model.shs_rest.transpose(1, 2).contiguous().cpu().numpy()
+                    shs_rest = shs_rest.reshape((n, -1))
+                    for i in range(shs_rest.shape[-1]):
+                        map_to_tensors[f"f_rest_{i}"] = shs_rest[:, i, None]
+                else:
+                    colors = torch.clamp(model.colors.clone(), 0.0, 1.0).data.cpu().numpy()
+                    map_to_tensors["colors"] = (colors * 255).astype(np.uint8)
 
-        with torch.no_grad():
-            positions = model.means.cpu().numpy()
-            count = positions.shape[0]
-            n = count
-            map_to_tensors["x"] = positions[:, 0]
-            map_to_tensors["y"] = positions[:, 1]
-            map_to_tensors["z"] = positions[:, 2]
-            map_to_tensors["nx"] = np.zeros(n, dtype=np.float32)
-            map_to_tensors["ny"] = np.zeros(n, dtype=np.float32)
-            map_to_tensors["nz"] = np.zeros(n, dtype=np.float32)
+                map_to_tensors["opacity"] = model.opacities.data.cpu().numpy()
 
-            if model.config.sh_degree > 0:
-                shs_0 = model.shs_0.contiguous().cpu().numpy()
-                for i in range(shs_0.shape[1]):
-                    map_to_tensors[f"f_dc_{i}"] = shs_0[:, i, None]
+                scales = model.scales.data.cpu().numpy()
+                for i in range(3):
+                    map_to_tensors[f"scale_{i}"] = scales[:, i, None]
 
-                # transpose(1, 2) was needed to match the sh order in Inria version
-                shs_rest = model.shs_rest.transpose(1, 2).contiguous().cpu().numpy()
-                shs_rest = shs_rest.reshape((n, -1))
-                for i in range(shs_rest.shape[-1]):
-                    map_to_tensors[f"f_rest_{i}"] = shs_rest[:, i, None]
-            else:
-                colors = torch.clamp(model.colors.clone(), 0.0, 1.0).data.cpu().numpy()
-                map_to_tensors["colors"] = (colors * 255).astype(np.uint8)
+                quats = model.quats.data.cpu().numpy()
+                for i in range(4):
+                    map_to_tensors[f"rot_{i}"] = quats[:, i, None]
 
-            map_to_tensors["opacity"] = model.opacities.data.cpu().numpy()
-
-            scales = model.scales.data.cpu().numpy()
-            for i in range(3):
-                map_to_tensors[f"scale_{i}"] = scales[:, i, None]
-
-            quats = model.quats.data.cpu().numpy()
-            for i in range(4):
-                map_to_tensors[f"rot_{i}"] = quats[:, i, None]
-
-        # post optimization, it is possible have NaN/Inf values in some attributes
-        # to ensure the exported ply file has finite values, we enforce finite filters.
-        select = np.ones(n, dtype=bool)
-        for k, t in map_to_tensors.items():
-            n_before = np.sum(select)
-            select = np.logical_and(select, np.isfinite(t).all())
-            n_after = np.sum(select)
-            if n_after < n_before:
-                CONSOLE.print(f"{n_before - n_after} NaN/Inf elements in {k}")
-
-        if np.sum(select) < n:
-            CONSOLE.print(f"values have NaN/Inf in map_to_tensors, only export {np.sum(select)}/{n}")
+            # post optimization, it is possible have NaN/Inf values in some attributes
+            # to ensure the exported ply file has finite values, we enforce finite filters.
+            select = np.ones(n, dtype=bool)
             for k, t in map_to_tensors.items():
-                map_to_tensors[k] = map_to_tensors[k][select, :]
+                n_before = np.sum(select)
+                select = np.logical_and(select, np.isfinite(t).all())
+                n_after = np.sum(select)
+                if n_after < n_before:
+                    CONSOLE.print(f"{n_before - n_after} NaN/Inf elements in {k}")
 
-        ExportGaussianSplat.write_ply(str(filename), count, map_to_tensors)
+            if np.sum(select) < n:
+                CONSOLE.print(f"values have NaN/Inf in map_to_tensors, only export {np.sum(select)}/{n}")
+                for k, t in map_to_tensors.items():
+                    map_to_tensors[k] = map_to_tensors[k][select, :]
 
+            ExportGaussianSplat.write_ply(str(filename), count, map_to_tensors)
+        
+        elif isinstance(pipeline.model, Splatfacto2dModel):
+            # import pdb; pdb.set_trace()
+            # pipeline.model.save_ply(self.output_dir)
+
+            # extract mesh 
+            rgbmaps = []
+            depthmaps = []
+            o3d_cams = []
+            for image_idx in tqdm(range(len(pipeline.datamanager.train_dataset)), desc="Render Training Image ..."):
+
+                assert len(pipeline.datamanager.train_dataset.cameras.shape) == 1, "Assumes single batch dimension"
+                camera = pipeline.datamanager.train_dataset.cameras[image_idx : image_idx + 1].to(pipeline.datamanager.device)
+                if camera.metadata is None:
+                    camera.metadata = {}
+                camera.metadata["cam_idx"] = image_idx
+
+                # forward pass
+                with torch.no_grad():
+                    render_pkg = pipeline.model(camera)
+
+                    rgb = render_pkg['render']
+                    depth = render_pkg['surf_depth'].permute(1, 2, 0)
+                    o3d_cam = to_cam_open3d(camera)
+                    
+                    rgbmaps.append(rgb.cpu())
+                    depthmaps.append(depth.cpu())
+                    o3d_cams.append(o3d_cam)
+
+            rgbmaps = torch.stack(rgbmaps, dim=0)
+            depthmaps = torch.stack(depthmaps, dim=0)
+
+            name = 'fuse.ply'
+            radius = estimate_bounding_sphere(o3d_cams)
+            depth_trunc = (radius * 2.0) if pipeline.model.config.depth_trunc < 0  else pipeline.model.config.depth_trunc
+            voxel_size = (depth_trunc / pipeline.model.config.mesh_res) if pipeline.model.config.voxel_size < 0 else pipeline.model.config.voxel_size
+            sdf_trunc = 5.0 * voxel_size if pipeline.model.config.sdf_trunc < 0 else pipeline.model.config.sdf_trunc
+            mesh = self.extract_mesh_bounded(rgbmaps, depthmaps, o3d_cams, voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc)
+            # compute vertex normals
+            mesh = mesh.compute_vertex_normals()
+            
+            o3d.io.write_triangle_mesh(os.path.join(self.output_dir, name), mesh)
+            print("mesh saved at {}".format(os.path.join(self.output_dir, name)))
+
+    @torch.no_grad()
+    def extract_mesh_bounded(self, rgbmaps, depthmaps, o3d_cams,
+                             voxel_size=0.004, sdf_trunc=0.02, depth_trunc=3, mask_backgrond=True):
+        """
+        Perform TSDF fusion given a fixed depth range, used in the paper.
+        
+        voxel_size: the voxel size of the volume
+        sdf_trunc: truncation value
+        depth_trunc: maximum depth range, should depended on the scene's scales
+        mask_backgrond: whether to mask backgroud, only works when the dataset have masks
+
+        return o3d.mesh
+        """
+        print("Running tsdf volume integration ...")
+        print(f'voxel_size: {voxel_size}')
+        print(f'sdf_trunc: {sdf_trunc}')
+        print(f'depth_truc: {depth_trunc}')
+
+        volume = o3d.pipelines.integration.ScalableTSDFVolume(
+            voxel_length= voxel_size,
+            sdf_trunc=sdf_trunc,
+            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+        )
+
+        for i, cam_o3d in tqdm(enumerate(o3d_cams), desc="TSDF integration progress"):
+            rgb = rgbmaps[i]
+            depth = depthmaps[i]
+            
+            # # if we have mask provided, use it
+            # if mask_backgrond and (self.viewpoint_stack[i].gt_alpha_mask is not None):
+            #     depth[(self.viewpoint_stack[i].gt_alpha_mask < 0.5)] = 0
+
+            # make open3d rgbd
+            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                o3d.geometry.Image(np.asarray(rgb.cpu().numpy() * 255, order="C", dtype=np.uint8)),
+                o3d.geometry.Image(np.asarray(depth.cpu().numpy(), order="C")),
+                depth_trunc = depth_trunc, convert_rgb_to_intensity=False,
+                depth_scale = 1.0
+            )
+
+            volume.integrate(rgbd, intrinsic=cam_o3d.intrinsic, extrinsic=cam_o3d.extrinsic)
+
+        mesh = volume.extract_triangle_mesh()
+        return mesh
 
 Commands = tyro.conf.FlagConversionOff[
     Union[

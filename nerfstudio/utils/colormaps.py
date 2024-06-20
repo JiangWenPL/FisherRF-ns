@@ -19,6 +19,8 @@ from typing import Literal, Optional
 
 import matplotlib
 import torch
+import numpy as np
+import matplotlib.pyplot as plt
 from jaxtyping import Bool, Float
 from torch import Tensor
 
@@ -26,8 +28,22 @@ from nerfstudio.utils import colors
 
 Colormaps = Literal["default", "turbo", "viridis", "magma", "inferno", "cividis", "gray", "pca"]
 
+def colormap(img, cmap='jet'):
+    W, H = img.shape[:2]
+    dpi = 300
+    fig, ax = plt.subplots(1, figsize=(H/dpi, W/dpi), dpi=dpi)
+    im = ax.imshow(img, cmap=cmap)
+    ax.set_axis_off()
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    fig.canvas.draw()
+    data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    img = torch.from_numpy(data / 255.).float().permute(2,0,1)
+    plt.close()
+    return img
 
-@dataclass(frozen=True)
+@dataclass
 class ColormapOptions:
     """Options for colormap"""
 

@@ -24,6 +24,7 @@ import os
 import shutil
 import struct
 import sys
+from copy import deepcopy
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -802,7 +803,8 @@ class DatasetRender(BaseRender):
                             sys.exit(1)
 
                         is_raw = False
-                        is_depth = rendered_output_name.find("depth") != -1
+                        is_depth = (rendered_output_name.find("depth") != -1) or (rendered_output_name.find("alpha") != -1)
+                        is_normal = rendered_output_name.find("normal") != -1
                         image_name = f"{camera_idx:05d}"
 
                         # Try to get the original filename
@@ -831,6 +833,10 @@ class DatasetRender(BaseRender):
                                 output_image = outputs[output_name]
                         del output_name
 
+                        # skip other statics
+                        if len(output_image.shape) < 2:
+                            continue
+
                         # Map to color spaces / numpy
                         if is_raw:
                             output_image = output_image.cpu().numpy()
@@ -838,7 +844,7 @@ class DatasetRender(BaseRender):
                             output_image = (
                                 colormaps.apply_depth_colormap(
                                     output_image,
-                                    accumulation=outputs["accumulation"],
+                                    accumulation=outputs.get("accumulation", None),
                                     near_plane=self.depth_near_plane,
                                     far_plane=self.depth_far_plane,
                                     colormap_options=self.colormap_options,

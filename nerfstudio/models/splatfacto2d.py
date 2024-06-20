@@ -27,12 +27,16 @@ from simple_knn._C import distCUDA2
 
 from matplotlib import pyplot as plt
 import numpy as np
+import os
 import torch
 from gsplat._torch_impl import quat_to_rotmat
 from gsplat.sh import num_sh_bases, spherical_harmonics
+from plyfile import PlyData, PlyElement
 from pytorch_msssim import SSIM
 from torch.nn import Parameter
 from typing_extensions import Literal
+import cv2
+from nerfstudio.utils.colormaps import colormap
 
 from nerfstudio.cameras.cameras import Cameras
 from nerfstudio.data.scene_box import OrientedBox
@@ -254,6 +258,14 @@ class Splatfacto2dModelConfig(ModelConfig):
     depth_ratio = 1.
     """  surf depth is either median or expected by setting depth_ratio to 1 or 0 """
 
+    depth_trunc = -1.0
+    """  truncation of depth for depth uncertainty """
+    voxel_size = -1.0
+    """ voxel size for depth uncertainty """
+    mesh_res = 1024
+    """ mesh resolution for depth uncertainty """
+    sdf_trunc = -1.0
+    """ truncation of sdf for depth uncertainty """
 
 class Splatfacto2dModel(Model):
     """Nerfstudio's implementation of Gaussian Splatting
@@ -800,78 +812,77 @@ class Splatfacto2dModel(Model):
         background = self.get_background()
 
         # import pdb; pdb.set_trace()
-        with torch.enable_grad():
-            # rasterize 2D Gaussians here
-            # 2D Gaussian Rendering
-            rasterizer, params = self.prepare_rasterizer(camera)
-            means3D, shs, opacities, scales, rotations = params
+        # rasterize 2D Gaussians here
+        # 2D Gaussian Rendering
+        rasterizer, params = self.prepare_rasterizer(camera)
+        means3D, shs, opacities, scales, rotations = params
 
-            # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-            self.xys = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda") + 0
-            try:
-                self.xys.retain_grad()
-            except:
-                pass
+        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+        self.xys = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda") + 0
+        try:
+            self.xys.retain_grad()
+        except:
+            pass
 
-            rendered_image, self.radii, allmap = rasterizer(
-                means3D=means3D,
-                means2D=self.xys,
-                shs=shs,
-                colors_precomp=None,
-                opacities=opacities,
-                scales=scales,
-                rotations=rotations,
-                cov3D_precomp=None)
-            
-             # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
-            # They will be excluded from value updates used in the splitting criteria.
-            rets =  {"render": rendered_image.permute(1, 2, 0),
-                    "viewspace_points": self.xys,
-                    "visibility_filter" : self.radii > 0,
-                    "radii": self.radii,
-                    "background": background}
+        rendered_image, self.radii, allmap = rasterizer(
+            means3D=means3D,
+            means2D=self.xys,
+            shs=shs,
+            colors_precomp=None,
+            opacities=opacities,
+            scales=scales,
+            rotations=rotations,
+            cov3D_precomp=None)
+        
+            # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
+        # They will be excluded from value updates used in the splitting criteria.
+        rets =  {"render": rendered_image.permute(1, 2, 0),
+                "viewspace_points": self.xys,
+                "visibility_filter" : self.radii > 0,
+                "radii": self.radii,
+                "background": background}
 
 
-            # additional regularizations
-            render_alpha = allmap[1:2]
+        # additional regularizations
+        render_alpha = allmap[1:2]
 
-            # get normal map
-            # transform normal from view space to world space
-            render_normal = allmap[2:5]
-            R = camera.camera_to_worlds[0, :3, :3]
-            render_normal = (render_normal.permute(1,2,0) @ (R.T)).permute(2,0,1)
-            
-            # get median depth map
-            render_depth_median = allmap[5:6]
-            render_depth_median = torch.nan_to_num(render_depth_median, 0, 0)
+        # get normal map
+        # transform normal from view space to world space
+        render_normal = allmap[2:5]
+        R = camera.camera_to_worlds[0, :3, :3]
+        render_normal = (render_normal.permute(1,2,0) @ (R.T)).permute(2,0,1)
+        
+        # get median depth map
+        render_depth_median = allmap[5:6]
+        render_depth_median = torch.nan_to_num(render_depth_median, 0, 0)
 
-            # get expected depth map
-            render_depth_expected = allmap[0:1]
-            render_depth_expected = (render_depth_expected / render_alpha)
-            render_depth_expected = torch.nan_to_num(render_depth_expected, 0, 0)
-            
-            # get depth distortion map
-            render_dist = allmap[6:7]
+        # get expected depth map
+        render_depth_expected = allmap[0:1]
+        render_depth_expected = (render_depth_expected / render_alpha)
+        render_depth_expected = torch.nan_to_num(render_depth_expected, 0, 0)
+        
+        # get depth distortion map
+        render_dist = allmap[6:7]
 
-            # psedo surface attributes
-            # surf depth is either median or expected by setting depth_ratio to 1 or 0
-            # for bounded scene, use median depth, i.e., depth_ratio = 1; 
-            # for unbounded scene, use expected depth, i.e., depth_ration = 0, to reduce disk anliasing.
-            surf_depth = render_depth_expected * (1 - self.config.depth_ratio) + (self.config.depth_ratio) * render_depth_median
-            
-            # assume the depth points form the 'surface' and generate psudo surface normal for regularizations.
-            surf_normal = depth_to_normal(camera, surf_depth)
-            surf_normal = surf_normal.permute(2,0,1)
-            # remember to multiply with accum_alpha since render_normal is unnormalized.
-            surf_normal = surf_normal * (render_alpha).detach()
+        # psedo surface attributes
+        # surf depth is either median or expected by setting depth_ratio to 1 or 0
+        # for bounded scene, use median depth, i.e., depth_ratio = 1; 
+        # for unbounded scene, use expected depth, i.e., depth_ration = 0, to reduce disk anliasing.
+        surf_depth = render_depth_expected * (1 - self.config.depth_ratio) + (self.config.depth_ratio) * render_depth_median
+        
+        # assume the depth points form the 'surface' and generate psudo surface normal for regularizations.
+        surf_normal = depth_to_normal(camera, surf_depth)
+        surf_normal = surf_normal.permute(2,0,1)
+        # remember to multiply with accum_alpha since render_normal is unnormalized.
+        surf_normal = surf_normal * (render_alpha).detach()
 
-            rets.update({
-                'rend_alpha': render_alpha,
-                'rend_normal': render_normal,
-                'rend_dist': render_dist,
-                'surf_depth': surf_depth,
-                'surf_normal': surf_normal,
-            })
+        rets.update({
+            'rend_alpha': render_alpha,
+            'rend_normal': render_normal,
+            'rend_dist': render_dist,
+            'surf_depth': surf_depth,
+            'surf_normal': surf_normal,
+        })
 
         return rets
           
@@ -973,7 +984,25 @@ class Splatfacto2dModel(Model):
         assert camera is not None, "must provide camera to gaussian model"
         self.set_crop(obb_box)
         outs = self.get_outputs(camera.to(self.device))
-        return outs  # type: ignore
+
+        outs_detach = {}
+        outs_detach["render"] = outs["render"].clamp(min=0., max=1.)
+        outs_detach["depth"] = outs["surf_depth"].permute(1, 2, 0)
+        outs_detach["background"] = outs["background"]
+
+        try:
+            rend_normal = outs["rend_normal"].permute(1, 2, 0) * 0.5 + 0.5
+            surf_normal = outs["surf_normal"].permute(1, 2, 0) * 0.5 + 0.5
+
+            outs_detach["rend_alpha"] = outs['rend_alpha'].permute(1, 2, 0)
+            outs_detach["rend_normal"] = rend_normal.permute(1, 2, 0)
+            outs_detach["rend_normal"] = torch.nn.functional.normalize(rend_normal, dim=-1) 
+            outs_detach["surf_normal"] = torch.nn.functional.normalize(surf_normal, dim=-1)
+            # outs_detach["rend_dist"] = rend_dist
+        except:
+            pass
+
+        return outs_detach  # type: ignore
 
     def get_image_metrics_and_images(
         self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
@@ -1129,4 +1158,38 @@ class Splatfacto2dModel(Model):
 
         params = [means3D, shs, opacities, scales, rotations]
         return rasterizer, params 
+
+    def construct_list_of_attributes(self):
+        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+        # All channels except the 3 DC
+        for i in range(self.features_dc.shape[1]):
+            l.append('f_dc_{}'.format(i))
+        for i in range(self.features_rest.shape[1]*self.features_rest.shape[2]):
+            l.append('f_rest_{}'.format(i))
+        l.append('opacity')
+        for i in range(self.scales.shape[1]):
+            l.append('scale_{}'.format(i))
+        for i in range(self.quats.shape[1]):
+            l.append('rot_{}'.format(i))
+        return l
     
+    def save_ply(self, path):
+        # mkdir_p(os.path.dirname(path))
+        path = os.path.join(path, "point_cloud.ply")
+
+        xyz = self.means.detach().cpu().numpy()
+        normals = np.zeros_like(xyz)
+        
+        f_dc = self.features_dc.detach().flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = self.features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities = self.opacities.detach().cpu().numpy()
+        scale = self.scales.detach().cpu().numpy()
+        rotation = self.quats.detach().cpu().numpy()
+
+        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        el = PlyElement.describe(elements, 'vertex')
+        PlyData([el]).write(path)
