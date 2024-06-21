@@ -377,8 +377,8 @@ class VanillaPipeline(Pipeline):
         
         # check uncertainty and select new views every 2000 steps
         
-        # option = 'fisher-single-view'
-        option = 'random'
+        option = 'fisher-single-view'
+        # option = 'random'
         if step % 2000 == 1999:
             # get the next views
             print("Selecting new view for training")
