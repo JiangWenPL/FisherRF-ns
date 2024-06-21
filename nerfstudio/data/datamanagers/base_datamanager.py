@@ -273,6 +273,29 @@ class DataManager(nn.Module):
         raise NotImplementedError
     
     @abstractmethod
+    def get_cam_data_from_idx(self, idx: int) -> Tuple[Union[RayBundle, Cameras], Dict]:
+        """Returns the camera data from the index.
+
+        Args:
+            idx: the index of the camera data to retrieve
+        Returns:
+            A tuple of the ray bundle for the image, and a dictionary of additional batch information
+            such as the groundtruth image.
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def get_current_views(self) -> List[int]:
+        """Gets the current views in the train subset.
+        
+        Args:
+            None
+        Returns:
+            The list of current views in the train subset.
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
     def add_new_view(self, idx: int) -> None:
         """Adds a new view to the training data manager from the whole train dataset to the train subset.
 

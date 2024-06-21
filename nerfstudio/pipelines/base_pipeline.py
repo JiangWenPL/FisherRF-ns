@@ -43,6 +43,8 @@ from nerfstudio.utils import profiler
 
 from einops import repeat, reduce, rearrange
 
+from tqdm import tqdm
+
 
 def module_wrapper(ddp_or_model: Union[DDP, Model]) -> Model:
     """
@@ -290,37 +292,68 @@ class VanillaPipeline(Pipeline):
         return self.model.device
     
     
-    def fisher_single_view(self, training_views: List[int], candidate_views: List[int]):
+    def fisher_single_view(self, training_views: List[int], candidate_views: List[int],
+                           rgb_weight=1.0, depth_weight=1.0):
         # construct initial Hessian matrix from the current training data
+        H_train = None
         
         for view in training_views:
             # get full camera from view idx
-            # get hessian and combine all hessians of single view.
-            pass
+            cam, batch = self.datamanager.get_cam_data_from_idx(view)
+            cur_H: torch.tensor = self.compute_hessian(cam, rgb_weight, depth_weight) # type: ignore
+            if H_train is None:
+                H_train = cur_H
+            else:
+                H_train += cur_H
+                
+        H_train = H_train.to(self.device) # type: ignore
+        # get hessian and combine all hessians of single view.
         
         # invert Hessian
+        reg_lambda = 1e-6
+        I_train = torch.reciprocal(H_train + reg_lambda)
+        
         # have acq scores as list of size of candidate cameras
+        acq_scores = torch.zeros(len(candidate_views))
         
         # go through each candidate camera and calculate the acq score
-        
-        # compute Hessian, add regularization ter if need be
-        # add sum(H(x)) * I(x) to acq score
+        for idx, view_idx in enumerate(tqdm(candidate_views, desc="Computing acq scores")):
+            cam, batch = self.datamanager.get_cam_data_from_idx(view_idx)
+            
+            cur_H: torch.tensor = self.compute_hessian(cam, rgb_weight, depth_weight) # type: ignore
+            
+            I_acq = cur_H
+            
+            acq_scores[idx] = torch.sum(I_acq * I_train).item()
+            
+        acq_scores /= 1000000000000
+        print(f"acq_scores: {acq_scores.tolist()}")
         
         # take max of acq score and return the view idx
+        _, indices = torch.sort(acq_scores, descending=True)
+        
+        top_idx = indices[0]
+        
+        selected_idxs = [candidate_views[top_idx]]
+        print('Selected views:', selected_idxs)
+        return selected_idxs[0]
         
     
-    def view_selection(self, views: List[int], option='random'):
+    def view_selection(self, training_views: List[int], candidate_views: List[int], option='random',
+                       rgb_weight=1.0, depth_weight=1.0):
         if option == 'random':
-            return random.choice(views)
+            return random.choice(candidate_views)
+        
         elif option == "fisher-single-view":
             # use fisher information to select the next view
-            return random.choice(views)
+            return self.fisher_single_view(training_views, candidate_views, rgb_weight, depth_weight)
+        
         elif option == "fisher-multi-view":
             # batch fisher information to select the next views
-            return views[0]
+            return candidate_views[0]
         else:
-            # select the first view in list. Not recommended.
-            return views[0]
+            # otherwise, select the first view in list. Not recommended.
+            return candidate_views[0]
 
     @profiler.time_function
     def get_train_loss_dict(self, step: int):
@@ -333,27 +366,29 @@ class VanillaPipeline(Pipeline):
         """
         # location of GS inference
         rgb_weight = 1.0
-        depth_weight = 1.0
+        depth_weight = 0.005
         
-        # ray_bundle, batch = self.datamanager.next_train_subset(step)
-        
-        ray_bundle, batch = self.datamanager.next_train(step)
-        
+        ray_bundle, batch = self.datamanager.next_train_subset(step)
         
         # in the case of GS, ray_bundle is a camera
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
-        # check uncertainty and selct new views every 1000 steps
-        # if step % 1000 == 999:
-        #     H = self.compute_hessian(ray_bundle, rgb_weight, depth_weight)
+        # check uncertainty and select new views every 2000 steps
+        
+        # option = 'fisher-single-view'
+        option = 'random'
+        if step % 2000 == 1999:
+            # get the next views
+            print("Selecting new view for training")
+            unseen_views  = self.datamanager.get_train_views_not_in_subset()
+            current_views = self.datamanager.get_current_views()
+            # select the next view
+            next_view = self.view_selection(current_views, unseen_views, option='fisher-single-view',
+                                            rgb_weight=rgb_weight, depth_weight=depth_weight)
             
-        # if step % 250 == 249:
-        #     # get the next views
-        #     unseen_views  = self.datamanager.get_train_views_not_in_subset()
-        #     next_view = self.view_selection(next_views, option='fisher-single-view')
-        #     self.datamanager.update_current_view(next_view) # type: ignore
+            self.datamanager.add_new_view(next_view) # type: ignore
         
         return model_outputs, loss_dict, metrics_dict
     

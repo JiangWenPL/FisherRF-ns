@@ -127,12 +127,16 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         
         # take a small subset of train images
         # self.train_unseen_cameras_subset = random.sample(self.train_unseen_cameras, 4)
+        print(len(self.train_unseen_cameras))
+        self.train_unseen_cameras_subset = [1, 10, 15, 20]
+        # self.train_unseen_cameras_subset = [1, 13, 26, 40]
         
-        self.train_unseen_cameras_subset = [1, 10, 15, 20, 25, 30]
-        self.original_subset = deepcopy(self.train_unseen_cameras)
+        # self.train_unseen_cameras_subset = [i for i in range(len(self.train_dataset))]
+        
+        
+        self.original_subset = deepcopy(self.train_unseen_cameras_subset)
         
         # self.original_subset = deepcopy(self.train_unseen_cameras_subset)
-        
         
         self.eval_unseen_cameras = [i for i in range(len(self.eval_dataset))]
         assert len(self.train_unseen_cameras) > 0, "No data found in dataset"
@@ -312,6 +316,19 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         # TODO: fix this to be the resolution of the last image rendered
         return 800 * 800
 
+    def get_cam_data_from_idx(self, idx: int) -> Tuple[Cameras, Dict]:
+        """Get the camera and data from the index"""
+        data = deepcopy(self.cached_train[idx])
+        data["image"] = data["image"].to(self.device)
+
+        assert len(self.train_dataset.cameras.shape) == 1, "Assumes single batch dimension"
+        camera = self.train_dataset.cameras[idx : idx + 1].to(self.device)
+        if camera.metadata is None:
+            camera.metadata = {}
+            
+        camera.metadata["cam_idx"] = idx
+        return camera, data
+
     def next_train(self, step: int) -> Tuple[Cameras, Dict]:
         """Returns the next training batch
         
@@ -319,8 +336,6 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         Returns a Camera instead of raybundle"""
 
-        # take n random images
-        
         image_idx = self.train_unseen_cameras.pop(random.randint(0, len(self.train_unseen_cameras) - 1))
         # Make sure to re-populate the unseen cameras list if we have exhausted it
         if len(self.train_unseen_cameras) == 0:
@@ -359,6 +374,10 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         
         difference = list(set(self.train_unseen_cameras) - set(self.original_subset))
         return difference
+    
+    def get_current_views(self):
+        """Get the current views"""
+        return self.original_subset
     
     def add_new_view(self, idx: int) -> None:
         self.original_subset.append(idx)

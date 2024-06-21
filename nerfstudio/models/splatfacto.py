@@ -229,15 +229,7 @@ class SplatfactoModel(Model):
     ):
         self.seed_points = seed_points
         
-        self.robot_mask = cv2.imread("/home/peasant98/Desktop/3DGS-LIL/panda-data/mask.png", cv2.IMREAD_GRAYSCALE) / 255
-    
-        self.robot_mask = self.robot_mask == 0
-        
-        self.robot_mask = self.robot_mask[..., None]
-        # convert mask to tensor
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.robot_mask = torch.tensor(self.robot_mask, dtype=torch.bool).to(device)
-        
+
         super().__init__(*args, **kwargs)
 
     def populate_modules(self):
@@ -879,7 +871,7 @@ class SplatfactoModel(Model):
             uncertainty = uncertainties[0].unsqueeze(2)
         
         # if self.training and self.step % 1000 == 0:
-        if self.training and False:
+        if self.training and self.step % 1000 == 0:
             uncertainties = self.render_uncertainty_rgb_depth([camera], [camera], rgb_weight=rgb_weight, depth_weight=depth_weight)
             uncertainty = uncertainties[0].unsqueeze(2)
             
@@ -1128,12 +1120,11 @@ class SplatfactoModel(Model):
             gt_img = gt_img * mask
             pred_img = pred_img * mask
             
-        mask = self._downscale_if_required(self.robot_mask)
-        mask = mask.to(self.device)
-        assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2]
-        gt_img = gt_img * mask
-        pred_img = pred_img * mask
-        
+        # mask = self._downscale_if_required(self.robot_mask)
+        # mask = mask.to(self.device)
+        # assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2]
+        # gt_img = gt_img * mask
+        # pred_img = pred_img * mask
 
         Ll1 = torch.abs(gt_img - pred_img).mean()
         simloss = 1 - self.ssim(gt_img.permute(2, 0, 1)[None, ...], pred_img.permute(2, 0, 1)[None, ...])
@@ -1421,7 +1412,6 @@ class SplatfactoModel(Model):
             H_info_depth['H'] = [p * depth_weight for p in H_info_depth['H']]
             H_per_gaussian += sum([reduce(p, "n ... -> n", "sum") for p in H_info_depth['H']])
         
-        
         hessian_color = repeat(H_per_gaussian.detach(), "n -> n c", c=3)
         uncern_maps = []
         for test_cam in test_cameras:
@@ -1453,6 +1443,13 @@ class SplatfactoModel(Model):
             
             # denormalize by rendered_depth
             rendered_image[0] = rendered_image[0]
+            
+            # plt.imshow(rendered_image[0].cpu().numpy())
+            # plt.show()
+            
+            # plot rendered image
+            # based on position of camera and bounding box on uncertainty, compute a crop of the image
+            
             uncern_maps.append(rendered_image[0])
 
             # log_pix_uncern = torch.log(rendered_image[0]) # C-dim is the same            
