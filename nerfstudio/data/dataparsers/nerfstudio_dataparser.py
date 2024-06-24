@@ -77,6 +77,10 @@ class NerfstudioDataParserConfig(DataParserConfig):
     """Replace the unknown pixels with this color. Relevant if you have a mask but still sample everywhere."""
     load_3D_points: bool = False
     """Whether to load the 3D points from the colmap reconstruction."""
+    load_depth: bool = False
+    """ load depth images from the dataset."""
+    depth_source: Literal["gt", "Zoe"] = "gt"
+    """ depth source to use for the dataset."""
 
 
 @dataclass
@@ -190,7 +194,6 @@ class Nerfstudio(DataParser):
         Different number of image and depth filenames.
         You should check that depth_file_path is specified for every frame (or zero frames) in transforms.json.
         """
-
         has_split_files_spec = any(f"{split}_filenames" in meta for split in ("train", "val", "test"))
         if f"{split}_filenames" in meta:
             # Validate split first

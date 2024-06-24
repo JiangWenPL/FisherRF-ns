@@ -427,6 +427,8 @@ class VanillaPipeline(Pipeline):
                 height, width = camera.height, camera.width
                 num_rays = height * width
                 metrics_dict, _ = self.model.get_image_metrics_and_images(outputs, batch)
+                
+                # TODO Save Render Outputs
                 if output_path is not None:
                     raise NotImplementedError("Saving images is not implemented yet")
 

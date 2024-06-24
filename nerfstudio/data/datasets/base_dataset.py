@@ -144,8 +144,22 @@ class InputDataset(Dataset):
         Args:
             image_idx: The image index in the dataset.
         """
-        del data
-        return {}
+        meta = {}
+        
+        # read the depth image if available
+        depth_files = self._dataparser_outputs.metadata.get("depth_filenames", None)
+        if depth_files is not None:
+            depth_filepath = depth_files[data["image_idx"]]
+            depth_image = Image.open(depth_filepath)
+            if self.scale_factor != 1.0:
+                width, height = depth_image.size
+                newsize = (int(width * self.scale_factor), int(height * self.scale_factor))
+                depth_image = depth_image.resize(newsize, resample=Image.BILINEAR)
+            
+            ## TODO Depth Scale
+            meta["depth"] = torch.from_numpy(np.array(depth_image, dtype="float32") / 1000.0 * self._dataparser_outputs.dataparser_scale)
+
+        return meta
 
     def __getitem__(self, image_idx: int) -> Dict:
         data = self.get_data(image_idx)

@@ -56,6 +56,16 @@ from diff_surfel_rasterization import GaussianRasterizationSettings, GaussianRas
 # from modified_diff_gaussian_rasterization import GaussianRasterizer as ModifiedGaussianRasterizer
 # from modified_diff_gaussian_rasterization import GaussianRasterizationSettings
 
+def pearson_loss(x, y):
+    """
+    Pearson loss between two tensors
+    """
+    x_mean = x.mean()
+    y_mean = y.mean()
+    x_centered = x - x_mean
+    y_centered = y - y_mean
+    return 1 - (x_centered * y_centered).sum() / (x_centered.norm() * y_centered.norm())
+
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
 
@@ -225,6 +235,10 @@ class Splatfacto2dModelConfig(ModelConfig):
     """weight of ssim loss"""
     lambda_normal: float = 0.05
     """ weight for normal loss """ 
+    depth_lambda: float = 0.
+    """ weight for depth loss """
+    depth_loss_type: Literal["L1", "Pearson"] = "L1"
+    """ depth loss type """
     lambda_dist: float = 0.
     """ weight for dist loss """
     stop_split_at: int = 15000
@@ -289,9 +303,9 @@ class Splatfacto2dModel(Model):
     def populate_modules(self):
         if self.seed_points is not None and not self.config.random_init:
             pcd = self.seed_points[0]
-            means = torch.nn.Parameter(pcd)  # (Location, Color)
+            means = torch.nn.Parameter(pcd).cuda()  # (Location, Color)
         else:
-            means = torch.nn.Parameter((torch.rand((self.config.num_random, 3)) - 0.5) * self.config.random_scale)
+            means = torch.nn.Parameter((torch.rand((self.config.num_random, 3)) - 0.5) * self.config.random_scale).cuda()
         
         self.xys_grad_norm = None
         self.max_2Dsize = None
@@ -305,8 +319,8 @@ class Splatfacto2dModel(Model):
         # scales = torch.nn.Parameter(torch.log(avg_dist.repeat(1, 2)))
         # quats = torch.nn.Parameter(random_quat_tensor(num_points))
         # opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(num_points, 1)))
-
-        dist2 = torch.clamp_min(distCUDA2(self.seed_points[0].float().cuda()), 0.0000001)
+        
+        dist2 = torch.clamp_min(distCUDA2(means.data), 0.0000001)
         scales = torch.nn.Parameter(torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2))
         quats = torch.nn.Parameter(torch.rand((num_points, 4), device="cuda"))
         opacities =  torch.nn.Parameter(inverse_sigmoid(0.1 * torch.ones((num_points, 1), dtype=torch.float, device="cuda")))
@@ -953,6 +967,18 @@ class Splatfacto2dModel(Model):
             gt_img = gt_img * mask
             pred_img = pred_img * mask
 
+        # import pdb; pdb.set_trace()
+        # compute depth loss
+        if "depth" in batch:
+            depth_map = self.get_gt_img(batch["depth"])
+            if self.config.depth_loss_type == "L1":
+                depth_loss = self.config.depth_lambda * torch.mean(torch.abs(depth_map - outputs["surf_depth"][0]))
+            elif self.config.depth_loss_type == "Pearson":
+                # compute Pearson Loss
+                depth_loss = self.config.depth_lambda * pearson_loss(depth_map, outputs["surf_depth"][0])
+        else:
+            depth_loss = torch.Tensor(0.0)
+
         Ll1 = (1 - self.config.ssim_lambda) * torch.abs(gt_img - pred_img).mean()
         ssimloss = self.config.ssim_lambda * (1 - self.ssim(gt_img.permute(2, 0, 1)[None, ...], pred_img.permute(2, 0, 1)[None, ...]))
         
@@ -970,7 +996,8 @@ class Splatfacto2dModel(Model):
             "ssim_loss": ssimloss,
             "l1_loss": Ll1,
             "normal_loss": normal_loss,
-            "dist_loss": dist_loss
+            "dist_loss": dist_loss,
+            "depth_loss": depth_loss
         }
 
     @torch.no_grad()

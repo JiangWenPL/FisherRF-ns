@@ -67,6 +67,8 @@ class FullImageDatamanagerConfig(DataManagerConfig):
     """The image type returned from manager, caching images in uint8 saves memory"""
     max_thread_workers: Optional[int] = None
     """The maximum number of threads to use for caching images. If None, uses all available threads."""
+    # load_depth: bool = False
+    # """ Whether to load depth images """
 
 
 class FullImageDatamanager(DataManager, Generic[TDataset]):
@@ -105,7 +107,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         if test_mode == "inference":
             self.dataparser.downscale_factor = 1  # Avoid opening images
         self.includes_time = self.dataparser.includes_time
-
+        
         self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train")
         self.train_dataset = self.create_train_dataset()
         self.eval_dataset = self.create_eval_dataset()
@@ -127,13 +129,9 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         
         # take a small subset of train images
         # self.train_unseen_cameras_subset = random.sample(self.train_unseen_cameras, 4)
-        
-        self.train_unseen_cameras_subset = [1, 10, 15, 20, 25, 30]
         self.original_subset = deepcopy(self.train_unseen_cameras)
-        
-        # self.original_subset = deepcopy(self.train_unseen_cameras_subset)
-        
-        
+        self.train_unseen_cameras_subset = deepcopy(self.original_subset)
+
         self.eval_unseen_cameras = [i for i in range(len(self.eval_dataset))]
         assert len(self.train_unseen_cameras) > 0, "No data found in dataset"
 

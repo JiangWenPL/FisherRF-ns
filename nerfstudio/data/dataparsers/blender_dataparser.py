@@ -67,7 +67,11 @@ class Blender(DataParser):
         image_filenames = []
         poses = []
         for frame in meta["frames"]:
-            fname = self.data / Path(frame["file_path"].replace("./", "") + ".png")
+            if frame["file_path"].find("png") == -1:
+                fname = self.data / Path(frame["file_path"].replace("./", "") + ".png")
+            else:
+                fname = self.data / Path(frame["file_path"].replace("./", ""))
+                
             image_filenames.append(fname)
             poses.append(np.array(frame["transform_matrix"]))
         poses = np.array(poses).astype(np.float32)
