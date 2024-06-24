@@ -128,7 +128,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         # take a small subset of train images
         # self.train_unseen_cameras_subset = random.sample(self.train_unseen_cameras, 4)
         print(len(self.train_unseen_cameras))
-        self.train_unseen_cameras_subset = [1, 10, 15, 20]
+        self.train_unseen_cameras_subset = [1, 4, 8, 12, 16, 20]
         # self.train_unseen_cameras_subset = [1, 13, 26, 40]
         
         # self.train_unseen_cameras_subset = [i for i in range(len(self.train_dataset))]

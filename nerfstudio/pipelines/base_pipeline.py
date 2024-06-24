@@ -368,7 +368,9 @@ class VanillaPipeline(Pipeline):
         rgb_weight = 1.0
         depth_weight = 0.005
         
-        ray_bundle, batch = self.datamanager.next_train_subset(step)
+        # ray_bundle, batch = self.datamanager.next_train_subset(step)
+        
+        ray_bundle, batch = self.datamanager.next_train(step)
         
         # in the case of GS, ray_bundle is a camera
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
@@ -376,19 +378,18 @@ class VanillaPipeline(Pipeline):
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
         # check uncertainty and select new views every 2000 steps
-        
-        option = 'fisher-single-view'
-        # option = 'random'
-        if step % 2000 == 1999:
-            # get the next views
-            print("Selecting new view for training")
-            unseen_views  = self.datamanager.get_train_views_not_in_subset()
-            current_views = self.datamanager.get_current_views()
-            # select the next view
-            next_view = self.view_selection(current_views, unseen_views, option='fisher-single-view',
-                                            rgb_weight=rgb_weight, depth_weight=depth_weight)
+        # option = 'fisher-single-view'
+        # # option = 'random'
+        # if step % 2000 == 1999:
+        #     # get the next views
+        #     print("Selecting new view for training")
+        #     unseen_views  = self.datamanager.get_train_views_not_in_subset()
+        #     current_views = self.datamanager.get_current_views()
+        #     # select the next view
+        #     next_view = self.view_selection(current_views, unseen_views, option='fisher-single-view',
+        #                                     rgb_weight=rgb_weight, depth_weight=depth_weight)
             
-            self.datamanager.add_new_view(next_view) # type: ignore
+        #     self.datamanager.add_new_view(next_view) # type: ignore
         
         return model_outputs, loss_dict, metrics_dict
     

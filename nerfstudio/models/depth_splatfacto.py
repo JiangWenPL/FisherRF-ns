@@ -43,7 +43,7 @@ from nerfstudio.engine.optimizers import Optimizers
 # need following import for background color override
 from nerfstudio.model_components import renderers
 from nerfstudio.model_components import losses
-from nerfstudio.model_components.losses import DepthLossType, basic_depth_loss, depth_ranking_loss, depth_uncertainty_weighted_loss
+from nerfstudio.model_components.losses import DepthLossType, basic_depth_loss, depth_ranking_loss, depth_uncertainty_weighted_loss, pearson_correlation_depth_loss
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils.colors import get_color
 from nerfstudio.utils.rich_utils import CONSOLE
@@ -62,7 +62,7 @@ class DepthSplatfactoModelConfig(SplatfactoModelConfig):
     """Splatfacto Model Config, nerfstudio's implementation of Gaussian Splatting"""
 
     _target: Type = field(default_factory=lambda: DepthSplatfactoModel)
-    depth_loss_mult: float = 0.005
+    depth_loss_mult: float = 0.1
     """Lambda of the depth loss."""
     is_euclidean_depth: bool = False
     """Whether input depth maps are Euclidean distances (or z-distances)."""
@@ -74,7 +74,7 @@ class DepthSplatfactoModelConfig(SplatfactoModelConfig):
     """Starting uncertainty around depth values in meters (defaults to 0.2m)."""
     sigma_decay_rate: float = 0.99985
     """Rate of exponential decay."""
-    depth_loss_type: DepthLossType = DepthLossType.SIMPLE_LOSS
+    depth_loss_type: DepthLossType = DepthLossType.PEARSON_LOSS
     """Depth loss type."""
     uncertainty_weight: float = 0.0
     """Weight of the uncertainty in the loss if uncertainty weighted loss is used."""
@@ -121,6 +121,12 @@ class DepthSplatfactoModel(SplatfactoModel):
                 
                 termination_depth = batch["depth_image"].to(self.device)
                 metrics_dict["depth_loss"] = basic_depth_loss(
+                    termination_depth, outputs["depth"])
+                
+            elif self.config.depth_loss_type in (DepthLossType.PEARSON_LOSS,):
+                metrics_dict["depth_loss"] = torch.Tensor([0.0]).to(self.device)
+                termination_depth = batch["depth_image"].to(self.device)
+                metrics_dict["depth_loss"] = pearson_correlation_depth_loss(
                     termination_depth, outputs["depth"])
                 
             elif self.config.depth_loss_type in (DepthLossType.DEPTH_UNCERTAINTY_WEIGHTED_LOSS,):
