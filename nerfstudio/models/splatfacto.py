@@ -197,6 +197,16 @@ class SplatfactoModelConfig(ModelConfig):
     """threshold of ratio of gaussian max to min scale before applying regularization
     loss from the PhysGaussian paper
     """
+    depth_trunc: float = -1.0
+    """  truncation of depth for depth uncertainty """
+    voxel_size: float = -1.0
+    """ voxel size for depth uncertainty """
+    mesh_res: int = 1024
+    """ mesh resolution for depth uncertainty """
+    sdf_trunc: float = -1.0
+    """ truncation of sdf for depth uncertainty """
+    num_cluster: int = 1
+    """ number of clusters for mesh post processing """
     output_depth_during_training: bool = True
     """If True, output depth during training. Otherwise, only output depth during evaluation."""
     rasterize_mode: Literal["classic", "antialiased"] = "classic"

@@ -50,21 +50,22 @@ from nerfstudio.utils.colors import get_color
 from nerfstudio.utils.rich_utils import CONSOLE
 
 from einops import repeat, reduce, rearrange
+from torchmetrics.functional.regression import pearson_corrcoef
 
-from diff_surfel_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+from diff_surfel_rasterization import GaussianRasterizationSettings, GaussianRasterizer, GaussianRasterizerModified
 
 # from modified_diff_gaussian_rasterization import GaussianRasterizer as ModifiedGaussianRasterizer
 # from modified_diff_gaussian_rasterization import GaussianRasterizationSettings
 
-def pearson_loss(x, y):
+def pearson_loss(x: torch.Tensor, y: torch.Tensor):
     """
     Pearson loss between two tensors
     """
-    x_mean = x.mean()
-    y_mean = y.mean()
-    x_centered = x - x_mean
-    y_centered = y - y_mean
-    return 1 - (x_centered * y_centered).sum() / (x_centered.norm() * y_centered.norm())
+    x = x.reshape(-1, 1)
+    y = y.reshape(-1, 1)
+
+    loss = (1 - pearson_corrcoef(x, y))
+    return torch.mean(loss)
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -257,6 +258,16 @@ class Splatfacto2dModelConfig(ModelConfig):
     """threshold of ratio of gaussian max to min scale before applying regularization
     loss from the PhysGaussian paper
     """
+    depth_trunc: float = -1.0
+    """  truncation of depth for depth uncertainty """
+    voxel_size: float = -1.0
+    """ voxel size for depth uncertainty """
+    mesh_res: int = 1024
+    """ mesh resolution for depth uncertainty """
+    sdf_trunc: float = -1.0
+    """ truncation of sdf for depth uncertainty """
+    num_cluster: int = 1
+    """ number of clusters for mesh post processing """
     output_depth_during_training: bool = True
     """If True, output depth during training. Otherwise, only output depth during evaluation."""
     rasterize_mode: Literal["classic", "antialiased"] = "classic"
@@ -271,15 +282,6 @@ class Splatfacto2dModelConfig(ModelConfig):
     """
     depth_ratio = 1.
     """  surf depth is either median or expected by setting depth_ratio to 1 or 0 """
-
-    depth_trunc = -1.0
-    """  truncation of depth for depth uncertainty """
-    voxel_size = -1.0
-    """ voxel size for depth uncertainty """
-    mesh_res = 1024
-    """ mesh resolution for depth uncertainty """
-    sdf_trunc = -1.0
-    """ truncation of sdf for depth uncertainty """
 
 class Splatfacto2dModel(Model):
     """Nerfstudio's implementation of Gaussian Splatting
@@ -818,6 +820,11 @@ class Splatfacto2dModel(Model):
                     "render" (H, W, 3) rendered RGB image
                     "viewspace_points" (N, 3) points in view space
         """
+
+        # uncomment for testing
+        # import pdb; pdb.set_trace()
+        # self.test_Hessian(camera)
+
         if not isinstance(camera, Cameras):
             print("Called get_outputs with not a camera")
             return {}
@@ -894,7 +901,7 @@ class Splatfacto2dModel(Model):
             'rend_alpha': render_alpha,
             'rend_normal': render_normal,
             'rend_dist': render_dist,
-            'surf_depth': surf_depth,
+            'surf_depth': surf_depth.permute(1, 2, 0),
             'surf_normal': surf_normal,
         })
 
@@ -967,18 +974,18 @@ class Splatfacto2dModel(Model):
             gt_img = gt_img * mask
             pred_img = pred_img * mask
 
-        # import pdb; pdb.set_trace()
         # compute depth loss
-        if "depth" in batch:
-            depth_map = self.get_gt_img(batch["depth"])
+        if "depth_image" in batch:
+            depth_map = self.get_gt_img(batch["depth_image"]).squeeze()
             if self.config.depth_loss_type == "L1":
                 depth_loss = self.config.depth_lambda * torch.mean(torch.abs(depth_map - outputs["surf_depth"][0]))
             elif self.config.depth_loss_type == "Pearson":
                 # compute Pearson Loss
                 depth_loss = self.config.depth_lambda * pearson_loss(depth_map, outputs["surf_depth"][0])
         else:
-            depth_loss = torch.Tensor(0.0)
+            depth_loss = torch.tensor(0.0, device = pred_img.device)
 
+        # RGB and SSIM Loss
         Ll1 = (1 - self.config.ssim_lambda) * torch.abs(gt_img - pred_img).mean()
         ssimloss = self.config.ssim_lambda * (1 - self.ssim(gt_img.permute(2, 0, 1)[None, ...], pred_img.permute(2, 0, 1)[None, ...]))
         
@@ -1075,7 +1082,8 @@ class Splatfacto2dModel(Model):
         return metrics_dict, images_dict
 
     # @torch.no_grad()
-    def prepare_rasterizer(self, camera: Cameras, clone_param=False) -> Tuple[GaussianRasterizer, List[torch.Tensor]]:
+    def prepare_rasterizer(self, camera: Cameras, 
+                           clone_param:bool=False, power:int=1, use_modify=False) -> Tuple[GaussianRasterizer, List[torch.Tensor]]:
         """Takes in a Ray Bundle and returns a dictionary of outputs.
 
         Args:
@@ -1162,20 +1170,24 @@ class Splatfacto2dModel(Model):
             sh_degree=n,
             campos=viewmat.inverse()[:3, 3],
             prefiltered=False,
+            power=power,
             debug=False
         )
-        rasterizer = GaussianRasterizer(raster_settings=raster_settings)
-        # rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+
+        if use_modify:
+            rasterizer = GaussianRasterizerModified(raster_settings=raster_settings) 
+        else:
+            rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
         # Create temporary varaibles to avoid side effects of the backward engine
         # this also addresses the issues of normalization for quaterions
         if clone_param:
-            means3D = means_crop.clone().requires_grad_(True)
-            shs = colors_crop.clone().requires_grad_(True)
-            opacities = opacities.clone().requires_grad_(True)
-            scales = torch.exp(scales_crop.clone()).requires_grad_(True)
+            means3D = means_crop.detach().requires_grad_(True)
+            shs = colors_crop.detach().requires_grad_(True)
+            opacities = opacities.detach().requires_grad_(True)
+            scales = torch.exp(scales_crop.detach()).requires_grad_(True)
             rotations = quats_crop / quats_crop.norm(dim=-1, keepdim=True)
-            rotations.requires_grad_(True)
+            rotations = rotations.detach().requires_grad_(True)
         else:
             means3D = means_crop
             shs = colors_crop
@@ -1220,3 +1232,69 @@ class Splatfacto2dModel(Model):
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
+
+    def test_Hessian(self, camera: Cameras):
+        if not isinstance(camera, Cameras):
+            print("Called get_outputs with not a camera")
+            return {}
+        assert camera.shape[0] == 1, "Only one camera at a time"
+
+        background = self.get_background()
+
+        # import pdb; pdb.set_trace()
+        # rasterize 2D Gaussians here
+        # 2D Gaussian Rendering
+        rasterizer_m, params_m = self.prepare_rasterizer(camera, clone_param=True, use_modify=True)
+        means3D_m, shs_m, opacities_m, scales_m, rotations_m = params_m
+
+        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+        xyzs_m = torch.zeros_like(means3D_m, dtype=means3D_m.dtype, requires_grad=True, device="cuda") + 0
+        try:
+            xyzs_m.retain_grad()
+        except:
+            pass
+
+        rendered_image_m, _, _ = rasterizer_m(
+            means3D=means3D_m,
+            means2D=xyzs_m,
+            shs=shs_m,
+            colors_precomp=None,
+            opacities=opacities_m,
+            scales=scales_m,
+            rotations=rotations_m,
+            cov3D_precomp=None)
+        
+        rendered_image_m.backward(0.01 * torch.ones_like(rendered_image_m))
+
+        print("Normal Render ...")
+        # Run the Modified Render again to compute gradient
+        rasterizer, params = self.prepare_rasterizer(camera, clone_param=True)
+        means3D, shs, opacities, scales, rotations = params
+
+        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+        xys = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda") + 0
+        try:
+            xys.retain_grad()
+        except:
+            pass
+
+        rendered_image, _, _ = rasterizer(
+            means3D=means3D,
+            means2D=xys,
+            shs=shs,
+            colors_precomp=None,
+            opacities=opacities,
+            scales=scales,
+            rotations=rotations,
+            cov3D_precomp=None)
+        
+        rendered_image.backward(0.01 * torch.ones_like(rendered_image))
+
+        import pdb; pdb.set_trace()
+        assert torch.allclose(means3D.grad, means3D_m.grad, atol=1e-5, rtol=1e-5), "Gradient of means3D is not equal"
+        assert torch.allclose(shs.grad, shs_m.grad, atol=1e-5, rtol=1e-5), "Gradient of shs is not equal"
+        assert torch.allclose(opacities.grad, opacities_m.grad, atol=1e-5, rtol=1e-5), "Gradient of opacities is not equal"
+        assert torch.allclose(scales.grad, scales_m.grad, atol=1e-5, rtol=1e-5), "Gradient of scales is not equal"
+        assert torch.allclose(rotations.grad, rotations_m.grad, atol=1e-5, rtol=1e-5), "Gradient of rotations is not equal"
+
+        

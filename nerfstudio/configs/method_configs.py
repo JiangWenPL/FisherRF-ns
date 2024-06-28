@@ -37,6 +37,7 @@ from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataPars
 from nerfstudio.data.dataparsers.phototourism_dataparser import PhototourismDataParserConfig
 from nerfstudio.data.dataparsers.sdfstudio_dataparser import SDFStudioDataParserConfig
 from nerfstudio.data.dataparsers.sitcoms3d_dataparser import Sitcoms3DDataParserConfig
+from nerfstudio.data.dataparsers.colmap_dataparser import ColmapDataParserConfig
 from nerfstudio.data.datasets.depth_dataset import DepthDataset
 from nerfstudio.data.datasets.sdf_dataset import SDFDataset
 from nerfstudio.data.datasets.semantic_dataset import SemanticDataset
@@ -603,7 +604,12 @@ method_configs["splatfacto"] = TrainerConfig(
     mixed_precision=False,
     pipeline=VanillaPipelineConfig(
         datamanager=FullImageDatamanagerConfig(
-            dataparser=NerfstudioDataParserConfig(load_3D_points=True),
+            # _target=FullImageDatamanager[DepthDataset],
+            dataparser=ColmapDataParserConfig(
+                orientation_method="none",
+                center_method="none",
+                auto_scale_poses=False
+            ),
             cache_images_type="uint8",
         ),
         model=SplatfactoModelConfig(),
@@ -652,7 +658,12 @@ method_configs["splatfacto2d"] = TrainerConfig(
     mixed_precision=False,
     pipeline=VanillaPipelineConfig(
         datamanager=FullImageDatamanagerConfig(
-            dataparser=NerfstudioDataParserConfig(load_3D_points=True),
+            # _target=FullImageDatamanager[DepthDataset],
+            dataparser=ColmapDataParserConfig(
+                orientation_method="none",
+                center_method="none",
+                auto_scale_poses=False
+            ),
             cache_images_type="uint8",
         ),
         model=Splatfacto2dModelConfig(),

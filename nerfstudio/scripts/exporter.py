@@ -30,7 +30,10 @@ from typing import List, Optional, Tuple, Union, cast
 import numpy as np
 import open3d as o3d
 import torch
+import trimesh
 import tyro
+import torch.nn.functional as torch_F
+from skimage.morphology import binary_dilation, disk
 from typing_extensions import Annotated, Literal
 from copy import deepcopy
 from tqdm import tqdm
@@ -70,6 +73,29 @@ def estimate_bounding_sphere(cams):
     print(f"Use at least {2.0 * radius:.2f} for depth_trunc")
 
     return radius
+
+def post_process_mesh(mesh, cluster_to_keep=1000):
+    """
+    Post-process a mesh to filter out floaters and disconnected parts
+    """
+    import copy
+    print("post processing the mesh to have {} clusterscluster_to_kep".format(cluster_to_keep))
+    mesh_0 = copy.deepcopy(mesh)
+    with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Debug) as cm:
+            triangle_clusters, cluster_n_triangles, cluster_area = (mesh_0.cluster_connected_triangles())
+
+    triangle_clusters = np.asarray(triangle_clusters)
+    cluster_n_triangles = np.asarray(cluster_n_triangles)
+    cluster_area = np.asarray(cluster_area)
+    n_cluster = np.sort(cluster_n_triangles.copy())[-cluster_to_keep]
+    n_cluster = max(n_cluster, 50) # filter meshes smaller than 50
+    triangles_to_remove = cluster_n_triangles[triangle_clusters] < n_cluster
+    mesh_0.remove_triangles_by_mask(triangles_to_remove)
+    mesh_0.remove_unreferenced_vertices()
+    mesh_0.remove_degenerate_triangles()
+    print("num vertices raw {}".format(len(mesh.vertices)))
+    print("num vertices post {}".format(len(mesh_0.vertices)))
+    return mesh_0
 
 def to_cam_open3d(cam):
     # shift the camera to center of scene looking at center
@@ -646,49 +672,73 @@ class ExportGaussianSplat(Exporter):
                     map_to_tensors[k] = map_to_tensors[k][select, :]
 
             ExportGaussianSplat.write_ply(str(filename), count, map_to_tensors)
+            
+            render_key = "rgb"
+            depth_key = "depth"
         
         elif isinstance(pipeline.model, Splatfacto2dModel):
             # import pdb; pdb.set_trace()
             # pipeline.model.save_ply(self.output_dir)
 
-            # extract mesh 
-            rgbmaps = []
-            depthmaps = []
-            o3d_cams = []
-            for image_idx in tqdm(range(len(pipeline.datamanager.train_dataset)), desc="Render Training Image ..."):
+            render_key = "render"
+            depth_key = "surf_depth"
 
-                assert len(pipeline.datamanager.train_dataset.cameras.shape) == 1, "Assumes single batch dimension"
-                camera = pipeline.datamanager.train_dataset.cameras[image_idx : image_idx + 1].to(pipeline.datamanager.device)
-                if camera.metadata is None:
-                    camera.metadata = {}
-                camera.metadata["cam_idx"] = image_idx
+        # extract mesh 
+        rgbmaps = []
+        depthmaps = []
+        o3d_cams = []
+        # masks = []
+        for image_idx in tqdm(range(len(pipeline.datamanager.cached_train)), desc="Render Training Image ..."): # type: ignore
 
-                # forward pass
-                with torch.no_grad():
-                    render_pkg = pipeline.model(camera)
+            assert len(pipeline.datamanager.train_dataset.cameras.shape) == 1, "Assumes single batch dimension" # type: ignore
+            camera = pipeline.datamanager.train_dataset.cameras[image_idx : image_idx + 1].to(pipeline.datamanager.device) # type: ignore
+            if camera.metadata is None:
+                camera.metadata = {}
+            camera.metadata["cam_idx"] = image_idx
 
-                    rgb = render_pkg['render']
-                    depth = render_pkg['surf_depth'].permute(1, 2, 0)
-                    o3d_cam = to_cam_open3d(camera)
-                    
-                    rgbmaps.append(rgb.cpu())
-                    depthmaps.append(depth.cpu())
-                    o3d_cams.append(o3d_cam)
+            # forward pass
+            with torch.no_grad():
+                render_pkg = pipeline.model(camera)
 
-            rgbmaps = torch.stack(rgbmaps, dim=0)
-            depthmaps = torch.stack(depthmaps, dim=0)
+                rgb = render_pkg[render_key]
+                depth = render_pkg[depth_key]
+                o3d_cam = to_cam_open3d(camera)
+                
+                rgbmaps.append(rgb.cpu())
+                depthmaps.append(depth.cpu())
+                o3d_cams.append(o3d_cam)
+                
+                # data = deepcopy(pipeline.datamanager.cached_train[image_idx]) # type: ignore
+                # masks.append(data["mask"])
 
-            name = 'fuse.ply'
-            radius = estimate_bounding_sphere(o3d_cams)
-            depth_trunc = (radius * 2.0) if pipeline.model.config.depth_trunc < 0  else pipeline.model.config.depth_trunc
-            voxel_size = (depth_trunc / pipeline.model.config.mesh_res) if pipeline.model.config.voxel_size < 0 else pipeline.model.config.voxel_size
-            sdf_trunc = 5.0 * voxel_size if pipeline.model.config.sdf_trunc < 0 else pipeline.model.config.sdf_trunc
-            mesh = self.extract_mesh_bounded(rgbmaps, depthmaps, o3d_cams, voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc)
-            # compute vertex normals
-            mesh = mesh.compute_vertex_normals()
-            
-            o3d.io.write_triangle_mesh(os.path.join(self.output_dir, name), mesh)
-            print("mesh saved at {}".format(os.path.join(self.output_dir, name)))
+        rgbmaps = torch.stack(rgbmaps, dim=0)
+        depthmaps = torch.stack(depthmaps, dim=0)
+
+        name = 'fuse.ply'
+        radius = estimate_bounding_sphere(o3d_cams)
+        depth_trunc = (radius * 2.0) if pipeline.model.config.depth_trunc < 0  else pipeline.model.config.depth_trunc # type: ignore
+        voxel_size = (depth_trunc / pipeline.model.config.mesh_res) if pipeline.model.config.voxel_size < 0 else pipeline.model.config.voxel_size # type: ignore
+        sdf_trunc = 5.0 * voxel_size if pipeline.model.config.sdf_trunc < 0 else pipeline.model.config.sdf_trunc # type: ignore
+        mesh = self.extract_mesh_bounded(rgbmaps, depthmaps, o3d_cams, voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc) # type: ignore
+        # compute vertex normals
+        mesh = mesh.compute_vertex_normals()
+
+        # import pdb; pdb.set_trace()
+        vertices = np.asarray(mesh.vertices)
+        # TODO flip the z and y axes to align with gsplat conventions
+        vertices[:, [2, 1]] = vertices[:, [1, 2]]
+        vertices[:, 1] = -1 * vertices[:, 1]
+        mesh.vertices = o3d.utility.Vector3dVector(vertices)
+
+        o3d.io.write_triangle_mesh(os.path.join(self.output_dir, name), mesh)
+        print("mesh saved at {}".format(os.path.join(self.output_dir, name)))
+
+        mesh_post = post_process_mesh(mesh, cluster_to_keep=pipeline.model.config.num_cluster)
+        o3d.io.write_triangle_mesh(os.path.join(self.output_dir, name.replace('.ply', '_post.ply')), mesh_post)
+
+        # TODO cull the 3D mesh with masks
+        # if len(masks) > 0:
+        #     cull_mesh(os.path.join(self.output_dir, name.replace('.ply', '_post.ply')), masks, o3d_cams)
 
     @torch.no_grad()
     def extract_mesh_bounded(self, rgbmaps, depthmaps, o3d_cams,

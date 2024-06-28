@@ -159,6 +159,23 @@ class InputDataset(Dataset):
             ## TODO Depth Scale
             meta["depth"] = torch.from_numpy(np.array(depth_image, dtype="float32") / 1000.0 * self._dataparser_outputs.dataparser_scale)
 
+        # TODO Add Depth Mask if possible
+        image_file_name = self._dataparser_outputs.image_filenames[data["image_idx"]]
+        base_file_dir = image_file_name.parent.parent
+        image_id = int(image_file_name.stem)
+        mask_png_name = "{:03d}".format(image_id) + ".png"
+        
+        # try to read mask
+        mask_file_name = base_file_dir / "mask" / mask_png_name
+        if Path.exists(mask_file_name):
+            # Gray Scale
+            mask_image = Image.open(mask_file_name).convert("L")
+            if self.scale_factor != 1.0:
+                width, height = depth_image.size
+                newsize = (int(width * self.scale_factor), int(height * self.scale_factor))
+                mask_image = mask_image.resize(newsize, resample=Image.BILINEAR)
+            meta["mask"] = torch.from_numpy(np.array(mask_image, dtype="float32"))
+        
         return meta
 
     def __getitem__(self, image_idx: int) -> Dict:
