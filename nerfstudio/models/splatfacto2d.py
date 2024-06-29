@@ -1021,7 +1021,7 @@ class Splatfacto2dModel(Model):
 
         outs_detach = {}
         outs_detach["render"] = outs["render"].clamp(min=0., max=1.)
-        outs_detach["depth"] = outs["surf_depth"].permute(1, 2, 0)
+        outs_detach["depth"] = outs["surf_depth"]
         outs_detach["background"] = outs["background"]
 
         try:
@@ -1232,6 +1232,72 @@ class Splatfacto2dModel(Model):
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
+
+    def compute_diag_H_rgb_depth(self, camera:Cameras):
+        """
+        Compute diagonal hessian, on rgb or depth.
+
+        return dict:
+        rgb: rendering from 2D-GS renderer (H, W, C)
+        depth: depth map from 2D-GS renderer (H, W)
+        H: list of diag hessian on gaussians in the order of:
+            means3D, shs, opacities, scales, rotations
+        """
+        rasterizer, params = self.prepare_rasterizer(camera, power=2, clone_param=True, use_modify=True)
+        means3D, shs, opacities, scales, rotations = params
+
+        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+        screenspace_points = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda") + 0
+        try:
+            screenspace_points.retain_grad()
+        except:
+            pass
+
+        with torch.enable_grad():
+            # rendered_image, radii = rasterizer(
+            rendered_image, self.radii, allmap = rasterizer(
+                means3D=means3D,
+                means2D=self.xys,
+                shs=shs,
+                colors_precomp=None,
+                opacities=opacities,
+                scales=scales,
+                rotations=rotations,
+                cov3D_precomp=None)
+            
+            rendered_image.backward(gradient=0.001 * torch.ones_like(rendered_image))
+            
+        cur_H = [p.grad.detach().clone() for p in params] #type: ignore
+            
+        for p in params:
+            p.grad = None
+            
+        rgb = rearrange(rendered_image, "c h w -> h w c")
+
+        return {"rgb": rgb, "H": cur_H}  # type: ignore
+
+    @torch.no_grad()
+    def compute_EIG(self, train_cameras: Iterable[Cameras], candidate_cameras: List[Cameras]) -> torch.Tensor:
+        """
+        compute EIG for single camera
+        """
+        EIG = torch.zeros(len(candidate_cameras), device=candidate_cameras[0].device)
+
+        H_train = None
+
+        for train_cam in train_cameras:
+            H_info = self.compute_diag_H_rgb_depth(train_cam)
+            cur_H_train = torch.cat([p.reshape(-1) for p in H_info["H"]])
+            H_train = H_train + cur_H_train if H_train is not None else cur_H_train
+
+        REG_LAMBDA = 1e-6 # NOTE: might need to adjust this regularizer
+        H_inv = torch.reciprocal(H_train + REG_LAMBDA)  #type: ignore
+        for i, candidate_cam in enumerate(candidate_cameras):
+            H_info = self.compute_diag_H_rgb_depth(candidate_cam)
+            H_candidate = torch.cat([p.reshape(-1) for p in H_info["H"]])
+            EIG[i] = torch.sum(H_inv * H_candidate) 
+
+        return EIG
 
     def test_Hessian(self, camera: Cameras):
         if not isinstance(camera, Cameras):

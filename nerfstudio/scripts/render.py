@@ -837,6 +837,9 @@ class DatasetRender(BaseRender):
                         if len(output_image.shape) < 2:
                             continue
 
+                        if output_image.shape[2] > 3:
+                            output_image = output_image[..., :3]
+
                         # Map to color spaces / numpy
                         if is_raw:
                             output_image = output_image.cpu().numpy()

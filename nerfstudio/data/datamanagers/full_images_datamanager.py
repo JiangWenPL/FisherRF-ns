@@ -69,6 +69,11 @@ class FullImageDatamanagerConfig(DataManagerConfig):
     """The maximum number of threads to use for caching images. If None, uses all available threads."""
     # load_depth: bool = False
     # """ Whether to load depth images """
+    start_img_num: int = -1
+    """ The number of images to start with """
+    batch_select_num: int = 1
+    """ The number of images to select in each batch """
+    select_step: int = -1
 
 
 class FullImageDatamanager(DataManager, Generic[TDataset]):
@@ -126,16 +131,40 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         # Some logic to make sure we sample every camera in equal amounts
         self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
+        random.shuffle(self.train_unseen_cameras)
         
         # take a small subset of train images
         # self.train_unseen_cameras_subset = random.sample(self.train_unseen_cameras, 4)
-        self.original_subset = deepcopy(self.train_unseen_cameras)
-        self.train_unseen_cameras_subset = deepcopy(self.original_subset)
+        if self.config.start_img_num > 0:
+            self.train_seen_cameras_subset = deepcopy(self.train_unseen_cameras[:self.config.start_img_num])
+            self.original_subset = deepcopy(self.train_seen_cameras_subset)
+            self.train_unseen_cameras = self.train_unseen_cameras[self.config.start_img_num:]
+        else:
+            # select all unseen cameras
+            self.train_seen_cameras_subset = deepcopy(self.train_unseen_cameras)
+            self.original_subset = deepcopy(self.train_unseen_cameras)
+
 
         self.eval_unseen_cameras = [i for i in range(len(self.eval_dataset))]
         assert len(self.train_unseen_cameras) > 0, "No data found in dataset"
 
         super().__init__()
+
+    # @property
+    # def get_unseen_cameras(self):
+    #     return self.train_dataset.cameras[self.train_unseen_cameras].to(self.device)
+    
+    # @property
+    # def get_seen_cameras(self):
+    #     return self.train_dataset.cameras[self.original_subset].to(self.device)
+    
+    # def add_views(self, view_ids):
+    #     """ Add views to train set and remove from unseen set """
+    #     unseen_list = [idx for idx in self.train_unseen_cameras if idx not in view_ids]
+    #     self.train_unseen_cameras = unseen_list
+
+    #     for idx in view_ids:
+    #         self.original_subset.append(idx)
 
     def cache_images(self, cache_images_option):
         cached_train = []
@@ -319,10 +348,10 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         # take n random images
         
-        image_idx = self.train_unseen_cameras.pop(random.randint(0, len(self.train_unseen_cameras) - 1))
+        image_idx = self.train_seen_cameras_subset.pop(random.randint(0, len(self.train_seen_cameras_subset) - 1))
         # Make sure to re-populate the unseen cameras list if we have exhausted it
-        if len(self.train_unseen_cameras) == 0:
-            self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
+        if len(self.train_seen_cameras_subset) == 0:
+            self.train_seen_cameras_subset = [i for i in range(len(self.train_dataset))]
 
         data = deepcopy(self.cached_train[image_idx])
         data["image"] = data["image"].to(self.device)
@@ -338,10 +367,11 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         """Returns the next training batch
 
         Returns a Camera instead of raybundle"""
-        image_idx = self.train_unseen_cameras_subset.pop(random.randint(0, len(self.train_unseen_cameras_subset) - 1))
+        image_idx = self.train_seen_cameras_subset.pop(random.randint(0, len(self.train_seen_cameras_subset) - 1))
         # Make sure to re-populate the unseen cameras list if we have exhausted it
-        if len(self.train_unseen_cameras_subset) == 0:
-            self.train_unseen_cameras_subset = deepcopy(self.original_subset)
+        if len(self.train_seen_cameras_subset) == 0:
+            self.train_seen_cameras_subset = deepcopy(self.original_subset)
+        
         data = deepcopy(self.cached_train[image_idx])
         data["image"] = data["image"].to(self.device)
 

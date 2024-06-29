@@ -662,7 +662,8 @@ method_configs["splatfacto2d"] = TrainerConfig(
             dataparser=ColmapDataParserConfig(
                 orientation_method="none",
                 center_method="none",
-                auto_scale_poses=False
+                auto_scale_poses=False,
+                eval_mode="all"
             ),
             cache_images_type="uint8",
         ),

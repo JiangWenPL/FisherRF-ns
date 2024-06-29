@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus=1
 #SBATCH --nodes=1
-#SBATCH --array=0-5
+##SBATCH --array=0-5
 #SBATCH --partition=batch
 #SBATCH --qos=normal
 ##SBATCH -w=kd-a40-0.grasp.maas
@@ -23,7 +23,8 @@ source /mnt/kostas-graid/sw/envs/boshu/miniconda3/bin/activate gaussian2d
 DTU_SCENES=("scan63" "scan65" "scan69" "scan83" "scan97" "scan105")
 # "scan24" "scan37"  "scan40" "scan55" "scan63" "scan65" "scan69" "scan83" "scan97" "scan105"
 
-SCENE=${DTU_SCENES[$SLURM_ARRAY_TASK_ID]}
+# SCENE=${DTU_SCENES[$SLURM_ARRAY_TASK_ID]}
+SCENE="scan65"
 DATADIR=/mnt/kostas-graid/datasets/boshu/DTU/DTU/${SCENE}
 
 # If directory 'colmap' exists, then skip, else create directory
@@ -40,7 +41,7 @@ cd ~/FisherRF-ns
 
 METHOD=$1
 ns-train ${METHOD} --vis viewer+tensorboard  \
-            --data ${DATADIR} \
+            --data /mnt/kostas-graid/datasets/boshu/DTU/DTU/${SCENE}/ \
             --pipeline.model.densify-size-thresh 0.05 \
             --pipeline.model.densify-grad-thresh 0.0002 \
             --pipeline.model.cull-alpha-thresh 0.05 \
@@ -48,6 +49,8 @@ ns-train ${METHOD} --vis viewer+tensorboard  \
             --pipeline.model.num-cluster 1 \
             --pipeline.model.voxel-size 0.004 \
             --pipeline.model.sdf-trunc 0.016 \
+            --experiment-name scan65_no_alpha \
             --pipeline.model.depth-trunc 3.0 \
+            --pipeline.model.background_color black \
             --viewer.quit-on-train-completion True \
             --pipeline.model.continue_cull_post_densification False colmap

@@ -696,14 +696,20 @@ class ExportGaussianSplat(Exporter):
                 camera.metadata = {}
             camera.metadata["cam_idx"] = image_idx
 
+            data = deepcopy(pipeline.datamanager.cached_train[image_idx]) # type: ignore
+            gt_image = data["image"]
+
             # forward pass
             with torch.no_grad():
                 render_pkg = pipeline.model(camera)
 
                 rgb = render_pkg[render_key]
                 depth = render_pkg[depth_key]
+
+                if gt_image.shape[2] > 3:
+                    depth[gt_image[..., 3] < 0.5] = 0.
+
                 o3d_cam = to_cam_open3d(camera)
-                
                 rgbmaps.append(rgb.cpu())
                 depthmaps.append(depth.cpu())
                 o3d_cams.append(o3d_cam)
