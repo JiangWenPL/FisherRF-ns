@@ -374,6 +374,7 @@ class VanillaPipeline(Pipeline):
         
         # in the case of GS, ray_bundle is a camera
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
+        self.model.lift_depths_to_3d(ray_bundle, batch) # type: ignore
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         

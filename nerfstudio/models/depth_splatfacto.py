@@ -34,6 +34,8 @@ from gsplat.sh import num_sh_bases, spherical_harmonics
 from pytorch_msssim import SSIM
 from torch.nn import Parameter
 from typing_extensions import Literal
+from typing import Dict, List, Optional, Tuple, Type, Union, Iterable
+
 
 from nerfstudio.cameras.cameras import Cameras
 from nerfstudio.data.scene_box import OrientedBox
@@ -78,6 +80,8 @@ class DepthSplatfactoModelConfig(SplatfactoModelConfig):
     """Depth loss type."""
     uncertainty_weight: float = 0.0
     """Weight of the uncertainty in the loss if uncertainty weighted loss is used."""
+    lift_depths_to_3d: bool = True
+    """Whether to lift the depths to 3D."""
 
 class DepthSplatfactoModel(SplatfactoModel):
     """Nerfstudio's implementation of Gaussian Splatting
@@ -87,6 +91,18 @@ class DepthSplatfactoModel(SplatfactoModel):
     """
 
     config: DepthSplatfactoModelConfig
+    
+    def __init__(
+        self,
+        *args,
+        seed_points: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ):
+        self.seed_points = seed_points
+        
+        self.lifted_depths = np.zeros(40)
+        
+        super().__init__(*args, **kwargs)
 
     def _get_sigma(self):
         if not self.config.should_decay_sigma:
@@ -96,6 +112,29 @@ class DepthSplatfactoModel(SplatfactoModel):
             self.config.sigma_decay_rate * self.depth_sigma, torch.tensor([self.config.depth_sigma])
         )
         return self.depth_sigma
+    
+    def depth_to_point_cloud(self, depth_image, intrinsics, extrinsics):
+        """
+        Convert a depth image to a point cloud using camera intrinsics and extrinsics.
+
+        Parameters:
+        depth_image (np.array): Depth image (H x W)
+        intrinsics (np.array): Camera intrinsics matrix (3 x 3)
+        extrinsics (np.array): Camera extrinsics matrix (4 x 4)
+
+        Returns:
+        np.array: Point cloud (N x 3)
+        """
+        height, width = depth_image.shape
+        i, j = np.meshgrid(np.arange(width), np.arange(height), indexing='xy')
+        z = depth_image.flatten()
+        x = (i.flatten() - intrinsics[0, 2]) * z / intrinsics[0, 0]
+        y = (j.flatten() - intrinsics[1, 2]) * z / intrinsics[1, 1]
+
+        points = np.vstack((x, y, z, np.ones_like(z)))
+        point_cloud = (extrinsics @ points)[:3].T
+        return point_cloud
+    
     
     def populate_modules(self):
         """Set the fields and modules."""
@@ -145,6 +184,29 @@ class DepthSplatfactoModel(SplatfactoModel):
                 raise NotImplementedError(f"Unknown depth loss type {self.config.depth_loss_type}")
         return metrics_dict
 
+    def lift_depths_to_3d(self, camera: Cameras, batch):
+        if self.training:
+            if self.config.lift_depths_to_3d:
+                termination_depth = batch["depth_image"].to(self.device)
+                
+                idx = (camera.metadata["cam_idx"]) # type: ignore
+                # check if gaussians from depth image were lifted to 3D
+                if self.lifted_depths[idx] == 0:
+                    self.lifted_depths[idx] = 1
+                    print(f"Added gaussians to 3D-GS for camera {idx}")
+                    extrinsics = camera.camera_to_worlds
+                    
+                    fx = camera.fx.cpu().numpy()[0][0]
+                    fy = camera.fy.cpu().numpy()[0][0]
+                    cx = camera.cx.cpu().numpy()[0][0]
+                    cy = camera.cy.cpu().numpy()[0][0]
+                    print(fx, fy, cx, cy)
+                    intrinsics = np.array([[fx, 0, cx],
+                                          [0, fy, cy],
+                                          [0,  0,  1]])
+                    
+                    # lift depths to 3d
+                    # lifted_gaussians = self.depth_to_point_cloud(termination_depth, intrinsics, extrinsics)
    
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
         loss_dict = super().get_loss_dict(outputs, batch, metrics_dict)

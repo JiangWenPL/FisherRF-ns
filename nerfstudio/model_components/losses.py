@@ -21,12 +21,12 @@ from typing import Dict, Literal, Optional, Tuple, cast
 import torch
 from jaxtyping import Bool, Float
 from torch import Tensor, nn
+from torchmetrics.functional.regression import pearson_corrcoef
 
 from nerfstudio.cameras.rays import RaySamples
 from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.utils.math import masked_reduction, normalized_depth_scale_and_shift
 
-from torchmetrics.functional.regression import pearson_corrcoef
 
 L1Loss = nn.L1Loss
 MSELoss = nn.MSELoss
