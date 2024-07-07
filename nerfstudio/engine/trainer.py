@@ -218,6 +218,12 @@ class Trainer:
             The optimizers object given the trainer config.
         """
         optimizer_config = self.config.optimizers.copy()
+
+        if "means" in optimizer_config.keys() and "extent" in self.pipeline.datamanager.train_dataparser_outputs.metadata.keys():
+            optimizer_config["means"]["optimizer"].lr = self.pipeline.datamanager.train_dataparser_outputs.metadata["extent"] * optimizer_config["means"]["optimizer"].lr
+            optimizer_config["means"]['scheduler'].lr_final = self.pipeline.datamanager.train_dataparser_outputs.metadata["extent"] * optimizer_config["means"]['scheduler'].lr_final
+            self.pipeline.model.set_extent(self.pipeline.datamanager.train_dataparser_outputs.metadata["extent"])
+
         param_groups = self.pipeline.get_param_groups()
         return Optimizers(optimizer_config, param_groups)
 
@@ -442,6 +448,8 @@ class Trainer:
                 "optimizers": {k: v.state_dict() for (k, v) in self.optimizers.optimizers.items()},
                 "schedulers": {k: v.state_dict() for (k, v) in self.optimizers.schedulers.items()},
                 "scalers": self.grad_scaler.state_dict(),
+                "seen_cameras": self.pipeline.datamanager.original_subset,
+                "unseen_cameras": self.pipeline.datamanager.train_unseen_cameras,
             },
             ckpt_path,
         )

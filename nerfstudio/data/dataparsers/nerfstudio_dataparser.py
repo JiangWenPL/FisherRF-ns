@@ -32,6 +32,7 @@ from nerfstudio.data.utils.dataparsers_utils import (
     get_train_eval_split_filename,
     get_train_eval_split_fraction,
     get_train_eval_split_interval,
+    getNerfppNorm
 )
 from nerfstudio.utils.io import load_from_json
 from nerfstudio.utils.rich_utils import CONSOLE
@@ -237,6 +238,10 @@ class Nerfstudio(DataParser):
             orientation_method = self.config.orientation_method
 
         poses = torch.from_numpy(np.array(poses).astype(np.float32))
+        
+        # get scene extent
+        scene_extent = getNerfppNorm(poses)
+        
         poses, transform_matrix = camera_utils.auto_orient_and_center_poses(
             poses,
             method=orientation_method,
@@ -417,6 +422,7 @@ class Nerfstudio(DataParser):
                 "depth_filenames": depth_filenames if len(depth_filenames) > 0 else None,
                 "depth_unit_scale_factor": self.config.depth_unit_scale_factor,
                 "mask_color": self.config.mask_color,
+                "extent": scene_extent["radius"],
                 **metadata,
             },
         )

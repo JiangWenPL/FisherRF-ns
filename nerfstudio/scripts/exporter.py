@@ -677,9 +677,9 @@ class ExportGaussianSplat(Exporter):
             depth_key = "depth"
         
         elif isinstance(pipeline.model, Splatfacto2dModel):
-            # import pdb; pdb.set_trace()
-            # pipeline.model.save_ply(self.output_dir)
+            pipeline.model.save_ply(self.output_dir)
 
+            pipeline.model.config.sh_degree = 0
             render_key = "render"
             depth_key = "surf_depth"
 
@@ -687,7 +687,7 @@ class ExportGaussianSplat(Exporter):
         rgbmaps = []
         depthmaps = []
         o3d_cams = []
-        # masks = []
+        cam_json = []
         for image_idx in tqdm(range(len(pipeline.datamanager.cached_train)), desc="Render Training Image ..."): # type: ignore
 
             assert len(pipeline.datamanager.train_dataset.cameras.shape) == 1, "Assumes single batch dimension" # type: ignore
@@ -704,7 +704,7 @@ class ExportGaussianSplat(Exporter):
                 render_pkg = pipeline.model(camera)
 
                 rgb = render_pkg[render_key]
-                depth = render_pkg[depth_key]
+                depth = render_pkg[depth_key].squeeze()
 
                 if gt_image.shape[2] > 3:
                     depth[gt_image[..., 3] < 0.5] = 0.
@@ -713,6 +713,25 @@ class ExportGaussianSplat(Exporter):
                 rgbmaps.append(rgb.cpu())
                 depthmaps.append(depth.cpu())
                 o3d_cams.append(o3d_cam)
+
+                # use the data from o3d camera structure 
+                rotation = o3d_cam.extrinsic[:3, :3]
+                translation = o3d_cam.extrinsic[:3, 3]
+
+                position_list = translation.tolist()
+                rotation_list = [r.tolist() for r in rotation]
+
+                # convert to json file
+                cam_dict = dict(
+                    id=image_idx,
+                    width=camera.width.item(),
+                    height=camera.height.item(),
+                    fx=camera.fx.item(),
+                    fy=camera.fy.item(),
+                    position=position_list,
+                    rotation=rotation_list,
+                )
+                cam_json.append(cam_dict)
                 
                 # data = deepcopy(pipeline.datamanager.cached_train[image_idx]) # type: ignore
                 # masks.append(data["mask"])
@@ -720,21 +739,22 @@ class ExportGaussianSplat(Exporter):
         rgbmaps = torch.stack(rgbmaps, dim=0)
         depthmaps = torch.stack(depthmaps, dim=0)
 
+        # dump to json file
+        with open(os.path.join(self.output_dir, "cameras.json"), "w") as f:
+            json.dump(cam_json, f)
+
         name = 'fuse.ply'
         radius = estimate_bounding_sphere(o3d_cams)
         depth_trunc = (radius * 2.0) if pipeline.model.config.depth_trunc < 0  else pipeline.model.config.depth_trunc # type: ignore
         voxel_size = (depth_trunc / pipeline.model.config.mesh_res) if pipeline.model.config.voxel_size < 0 else pipeline.model.config.voxel_size # type: ignore
         sdf_trunc = 5.0 * voxel_size if pipeline.model.config.sdf_trunc < 0 else pipeline.model.config.sdf_trunc # type: ignore
         mesh = self.extract_mesh_bounded(rgbmaps, depthmaps, o3d_cams, voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc) # type: ignore
-        # compute vertex normals
-        mesh = mesh.compute_vertex_normals()
 
-        # import pdb; pdb.set_trace()
-        vertices = np.asarray(mesh.vertices)
-        # TODO flip the z and y axes to align with gsplat conventions
-        vertices[:, [2, 1]] = vertices[:, [1, 2]]
-        vertices[:, 1] = -1 * vertices[:, 1]
-        mesh.vertices = o3d.utility.Vector3dVector(vertices)
+        # vertices = np.asarray(mesh.vertices)
+        # # TODO flip the z and y axes to align with gsplat conventions
+        # vertices[:, [2, 1]] = vertices[:, [1, 2]]
+        # vertices[:, 1] = -1 * vertices[:, 1]
+        # mesh.vertices = o3d.utility.Vector3dVector(vertices)
 
         o3d.io.write_triangle_mesh(os.path.join(self.output_dir, name), mesh)
         print("mesh saved at {}".format(os.path.join(self.output_dir, name)))
@@ -769,6 +789,7 @@ class ExportGaussianSplat(Exporter):
             sdf_trunc=sdf_trunc,
             color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
         )
+
 
         for i, cam_o3d in tqdm(enumerate(o3d_cams), desc="TSDF integration progress"):
             rgb = rgbmaps[i]

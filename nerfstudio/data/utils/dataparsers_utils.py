@@ -19,6 +19,40 @@ from typing import List, Tuple
 
 import numpy as np
 
+def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
+    Rt = np.zeros((4, 4))
+    Rt[:3, :3] = R.transpose()
+    Rt[:3, 3] = t
+    Rt[3, 3] = 1.0
+
+    C2W = np.linalg.inv(Rt)
+    cam_center = C2W[:3, 3]
+    cam_center = (cam_center + translate) * scale
+    C2W[:3, 3] = cam_center
+    Rt = np.linalg.inv(C2W)
+    return np.float32(Rt)
+
+def getNerfppNorm(cam_info):
+    def get_center_and_diag(cam_centers):
+        cam_centers = np.hstack(cam_centers)
+        avg_cam_center = np.mean(cam_centers, axis=1, keepdims=True)
+        center = avg_cam_center
+        dist = np.linalg.norm(cam_centers - center, axis=0, keepdims=True)
+        diagonal = np.max(dist)
+        return center.flatten(), diagonal
+
+    cam_centers = []
+
+    for C2W in cam_info:
+        cam_centers.append(C2W[:3, 3:4])
+
+    center, diagonal = get_center_and_diag(cam_centers)
+    radius = diagonal * 1.1
+
+    translate = -center
+
+    return {"translate": translate, "radius": radius}
+
 
 def get_train_eval_split_fraction(image_filenames: List, train_split_fraction: float) -> Tuple[np.ndarray, np.ndarray]:
     """

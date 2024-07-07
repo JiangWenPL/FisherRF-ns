@@ -663,8 +663,15 @@ method_configs["splatfacto2d"] = TrainerConfig(
                 orientation_method="none",
                 center_method="none",
                 auto_scale_poses=False,
-                eval_mode="all"
+                # eval_mode="all",
+                assume_colmap_world_coordinate_convention=False
             ),
+            # dataparser=NerfstudioDataParserConfig(
+            #     orientation_method="none",
+            #     center_method="none",
+            #     auto_scale_poses=False,
+            #     eval_mode="all",
+            # ),
             cache_images_type="uint8",
         ),
         model=Splatfacto2dModelConfig(),

@@ -71,10 +71,14 @@ class FullImageDatamanagerConfig(DataManagerConfig):
     # """ Whether to load depth images """
     start_img_num: int = -1
     """ The number of images to start with """
+    final_img_num: int = -1
+    """ The number of images to end with """
     batch_select_num: int = 1
     """ The number of images to select in each batch """
     select_step: int = -1
-
+    """ The number of steps to select new images """
+    select_method: Literal["random", "Fisher"] = "random"
+    """ The method to select new images """
 
 class FullImageDatamanager(DataManager, Generic[TDataset]):
     """
@@ -131,14 +135,14 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         # Some logic to make sure we sample every camera in equal amounts
         self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
-        random.shuffle(self.train_unseen_cameras)
         
         # take a small subset of train images
         # self.train_unseen_cameras_subset = random.sample(self.train_unseen_cameras, 4)
         if self.config.start_img_num > 0:
-            self.train_seen_cameras_subset = deepcopy(self.train_unseen_cameras[:self.config.start_img_num])
+            # deterministic start
+            self.train_seen_cameras_subset = [0, 5, 10, 15]
             self.original_subset = deepcopy(self.train_seen_cameras_subset)
-            self.train_unseen_cameras = self.train_unseen_cameras[self.config.start_img_num:]
+            self.train_unseen_cameras = [k for k in self.train_unseen_cameras if k not in self.train_seen_cameras_subset]
         else:
             # select all unseen cameras
             self.train_seen_cameras_subset = deepcopy(self.train_unseen_cameras)
@@ -150,21 +154,19 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         super().__init__()
 
-    # @property
-    # def get_unseen_cameras(self):
-    #     return self.train_dataset.cameras[self.train_unseen_cameras].to(self.device)
+    def get_unseen_cameras(self) -> List[Cameras]:
+        cameras = [self.train_dataset.cameras[k:k+1].to(self.device) for k in self.train_unseen_cameras]
+        return cameras
     
-    # @property
-    # def get_seen_cameras(self):
-    #     return self.train_dataset.cameras[self.original_subset].to(self.device)
+    def get_seen_cameras(self) -> List[Cameras]:
+        cameras = [self.train_dataset.cameras[k:k+1].to(self.device) for k in self.original_subset]
+        return cameras
     
-    # def add_views(self, view_ids):
-    #     """ Add views to train set and remove from unseen set """
-    #     unseen_list = [idx for idx in self.train_unseen_cameras if idx not in view_ids]
-    #     self.train_unseen_cameras = unseen_list
-
-    #     for idx in view_ids:
-    #         self.original_subset.append(idx)
+    def add_views(self, view_ids):
+        """ Add views to train set and remove from unseen set """
+        # unseen_list = [idx for idx in self.train_unseen_cameras if idx not in view_ids]
+        view_idx = self.train_unseen_cameras.pop(view_ids)
+        self.original_subset.append(view_idx)
 
     def cache_images(self, cache_images_option):
         cached_train = []

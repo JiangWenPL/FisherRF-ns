@@ -337,21 +337,37 @@ class VanillaPipeline(Pipeline):
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
+
+        seen_cameras = self.datamanager.get_seen_cameras()
+
+        if self.datamanager.config.select_step > 0 and (step + 1) % self.datamanager.config.select_step == 0 \
+            and len(seen_cameras) < self.datamanager.config.final_img_num : # type: ignore
+
+            for k in range(self.datamanager.config.batch_select_num): # type: ignore
+                # select the next view
+                unseen_cameras = self.datamanager.get_unseen_cameras()
+                seen_cameras = self.datamanager.get_seen_cameras()
+
+                self.model.set_base_active_step(step)
+
+                if self.datamanager.config.select_method == "Fisher":
+                    EIG = self.model.compute_EIG(seen_cameras, unseen_cameras) # type: ignore
+                    best_view_id = EIG.argmax().item()
+
+                    # # get the next view
+                    # select_view_idx = unseen_cameras[best_view] # type: ignore
+
+                    # add the new view to the training set
+                    self.datamanager.add_views(best_view_id)
+
+                elif self.datamanager.config.select_method == "random":
+                    select_view_idx = random.randint(0, len(unseen_cameras))
+                    self.datamanager.add_views(select_view_idx)
+                else:
+                    raise NotImplementedError(f"Unknown view selection method: {self.datamanager.config.select_method}")
+
         
-        return model_outputs, loss_dict, metrics_dict
-    
-    
-    def compute_hessian(self, ray_bundle, rgb_weight, depth_weight):
-        if hasattr(self.model, 'compute_diag_H_rgb_depth') and callable(getattr(self.model, 'compute_diag_H_rgb_depth')):
-            # compute the Hessian
-            H_info_rgb = self.model.compute_diag_H_rgb_depth(ray_bundle, compute_rgb_H=True) # type: ignore
-            H_info_rgb['H'] = [p * rgb_weight for p in H_info_rgb['H']]
-            H_per_gaussian = sum([reduce(p, "n ... -> n", "sum") for p in H_info_rgb['H']])
-            
-            H_info_depth = self.model.compute_diag_H_rgb_depth(ray_bundle, compute_rgb_H=False) # type: ignore
-            H_info_depth['H'] = [p * depth_weight for p in H_info_depth['H']]
-            H_per_gaussian += sum([reduce(p, "n ... -> n", "sum") for p in H_info_depth['H']])
-            return H_per_gaussian   
+        return model_outputs, loss_dict, metrics_dict  
 
     def forward(self):
         """Blank forward method

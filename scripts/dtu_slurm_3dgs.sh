@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus=1
 #SBATCH --nodes=1
-#SBATCH --array=0-5
+##SBATCH --array=0-5
 #SBATCH --partition=batch
 #SBATCH --qos=normal
 ##SBATCH -w=kd-a40-0.grasp.maas
@@ -20,14 +20,11 @@ hostname
 echo $SLURM_ARRAY_TASK_ID '/' $SLURM_ARRAY_TASK_COUNT '/ Job ID' $SLURM_JOBID
 
 source /mnt/kostas-graid/sw/envs/boshu/miniconda3/bin/activate gaussian2d
-DTU_SCENES=("scan24" "scan37" "scan55" "scan63" "scan65" "scan69")
+DTU_SCENES=("scan63" "scan65" "scan69" "scan83" "scan97" "scan105")
 # "scan24" "scan37"  "scan40" "scan55" "scan63" "scan65" "scan69" "scan83" "scan97" "scan105"
 
-SCENE=${DTU_SCENES[$SLURM_ARRAY_TASK_ID]}
-SCENE_ID=${SCENE:4}
-echo "Scene ID is ${SCENE_ID}"
-
-EXP_NAME=$1
+# SCENE=${DTU_SCENES[$SLURM_ARRAY_TASK_ID]}
+SCENE=$2
 DATADIR=/mnt/kostas-graid/datasets/boshu/DTU/DTU/${SCENE}
 
 # If directory 'colmap' exists, then skip, else create directory
@@ -42,23 +39,18 @@ fi
 
 cd ~/FisherRF-ns
 
-ns-train splatfacto2d --vis viewer+tensorboard  \
+METHOD=$1
+ns-train ${METHOD} --vis viewer+tensorboard  \
             --data /mnt/kostas-graid/datasets/boshu/DTU/DTU/${SCENE}/ \
-            --pipeline.model.densify-grad-thresh 0.00012 \
+            --pipeline.model.densify-size-thresh 0.05 \
+            --pipeline.model.densify-grad-thresh 0.0002 \
+            --pipeline.model.cull-alpha-thresh 0.05 \
             --pipeline.model.stop-screen-size-at 30000 \
             --pipeline.model.num-cluster 1 \
             --pipeline.model.voxel-size 0.004 \
             --pipeline.model.sdf-trunc 0.016 \
-            --experiment-name ${SCENE}_${EXP_NAME} \
-            --pipeline.model.lambda_dist 1000 \
-            --pipeline.model.lambda_normal 0.05 \
+            --experiment-name ${SCENE}_all_alpha_mask_grad_0002 \
             --pipeline.model.depth-trunc 3.0 \
             --pipeline.model.background_color black \
             --viewer.quit-on-train-completion True \
-            --pipeline.datamanager.camera_res_scale_factor 0.5 \
             --pipeline.model.continue_cull_post_densification False colmap
-
-python scripts/dtu_eval.py --exp_dir outputs/${SCENE}_${EXP_NAME}/splatfacto2d/ \
-        --scan_id ${SCENE_ID} \
-        --DTU /mnt/kostas-graid/datasets/boshu/DTU/SampleSet/MVSData \
-        --dtu /mnt/kostas-graid/datasets/boshu/DTU/DTU/

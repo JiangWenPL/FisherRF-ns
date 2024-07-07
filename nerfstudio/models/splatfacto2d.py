@@ -204,9 +204,9 @@ class Splatfacto2dModelConfig(ModelConfig):
     """Whether to randomize the background color."""
     num_downscales: int = 0
     """at the beginning, resolution is 1/2^d, where d is this number"""
-    cull_alpha_thresh: float = 0.1
+    cull_alpha_thresh: float = 0.05
     """threshold of opacity for culling gaussians. One can set it to a lower value (e.g. 0.005) for higher quality."""
-    cull_scale_thresh: float = 0.5
+    cull_scale_thresh_percent: float = 0.1
     """threshold of scale for culling huge gaussians"""
     continue_cull_post_densification: bool = True
     """If True, continue to cull gaussians post refinement"""
@@ -214,7 +214,7 @@ class Splatfacto2dModelConfig(ModelConfig):
     """Every this many refinement steps, reset the alpha"""
     densify_grad_thresh: float = 0.0002
     """threshold of positional gradient norm for densifying gaussians"""
-    densify_size_thresh: float = 0.01
+    densify_size_thresh_percent: float = 0.01
     """below this size, gaussians are *duplicated*, otherwise split"""
     n_split_samples: int = 2
     """number of samples to split gaussians into"""
@@ -280,7 +280,7 @@ class Splatfacto2dModelConfig(ModelConfig):
     However, PLY exported with antialiased rasterize mode is not compatible with classic mode. Thus many web viewers that
     were implemented for classic mode can not render antialiased mode PLY properly without modifications.
     """
-    depth_ratio = 1.
+    depth_ratio: float = 1.
     """  surf depth is either median or expected by setting depth_ratio to 1 or 0 """
 
 class Splatfacto2dModel(Model):
@@ -299,6 +299,8 @@ class Splatfacto2dModel(Model):
         **kwargs,
     ):
         self.seed_points = seed_points
+        # only used for active learning
+        self.base_active_step = 0
 
         super().__init__(*args, **kwargs)
 
@@ -373,6 +375,12 @@ class Splatfacto2dModel(Model):
             )  # This color is the same as the default background color in Viser. This would only affect the background color when rendering.
         else:
             self.background_color = get_color(self.config.background_color)
+
+    def set_extent(self, extent:float):
+        self.extent: float = extent
+
+    def set_base_active_step(self, base_active_step):
+        self.base_active_step = base_active_step
 
     @property
     def colors(self):
@@ -510,9 +518,11 @@ class Splatfacto2dModel(Model):
 
     def after_train(self, step: int):
         assert step == self.step
+        
         # to save some training time, we no longer need to update those stats post refinement
         if self.step >= self.config.stop_split_at:
             return
+        
         with torch.no_grad():
             # keep track of a moving average of grad norms
             # import pdb; pdb.set_trace()
@@ -548,6 +558,7 @@ class Splatfacto2dModel(Model):
 
     def refinement_after(self, optimizers: Optimizers, step):
         assert step == self.step
+        # for initialization, we keep the warmup length
         if self.step <= self.config.warmup_length:
             return
  
@@ -559,7 +570,7 @@ class Splatfacto2dModel(Model):
             reset_interval = self.config.reset_alpha_every * self.config.refine_every
             do_densification = (
                 self.step < self.config.stop_split_at
-                and self.step % reset_interval > self.num_train_data + self.config.refine_every
+                and (self.step - self.base_active_step) % reset_interval > self.num_train_data + self.config.refine_every
             )
             if do_densification:
                 # then we densify
@@ -567,17 +578,17 @@ class Splatfacto2dModel(Model):
                 # Official implementation DO NOT use scale
                 avg_grad_norm = (self.xys_grad_norm / self.vis_counts) # * 0.5 * max(self.last_size[0], self.last_size[1])
                 high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
-                splits = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
+                splits = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh_percent * self.extent).squeeze()
                 
                 # Not in Official Implementation
-                if self.step < self.config.stop_screen_size_at:
-                    splits |= (self.max_2Dsize > self.config.split_screen_size).squeeze()
+                # if self.step < self.config.stop_screen_size_at:
+                #     splits |= (self.max_2Dsize > self.config.split_screen_size).squeeze()
                 
                 splits &= high_grads
                 nsamps = self.config.n_split_samples
                 split_params = self.split_gaussians(splits, nsamps)
 
-                dups = (self.scales.exp().max(dim=-1).values <= self.config.densify_size_thresh).squeeze()
+                dups = (self.scales.exp().max(dim=-1).values <= self.config.densify_size_thresh_percent * self.extent).squeeze()
                 dups &= high_grads
                 dup_params = self.dup_gaussians(dups)
                 for name, param in self.gauss_params.items():
@@ -658,7 +669,7 @@ class Splatfacto2dModel(Model):
             culls = culls | extra_cull_mask
         if self.step > self.config.refine_every * self.config.reset_alpha_every:
             # cull huge ones
-            toobigs = (torch.exp(self.scales).max(dim=-1).values > self.config.cull_scale_thresh).squeeze()
+            toobigs = (torch.exp(self.scales).max(dim=-1).values > self.config.cull_scale_thresh_percent * self.extent).squeeze()
             if self.step < self.config.stop_screen_size_at:
                 # cull big screen space
                 assert self.max_2Dsize is not None
@@ -835,7 +846,7 @@ class Splatfacto2dModel(Model):
         # import pdb; pdb.set_trace()
         # rasterize 2D Gaussians here
         # 2D Gaussian Rendering
-        rasterizer, params = self.prepare_rasterizer(camera)
+        rasterizer, params = self.prepare_rasterizer(camera, background)
         means3D, shs, opacities, scales, rotations = params
 
         # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
@@ -927,7 +938,8 @@ class Splatfacto2dModel(Model):
         """
         if image.shape[2] == 4:
             alpha = image[..., -1].unsqueeze(-1).repeat((1, 1, 3))
-            return alpha * image[..., :3] + (1 - alpha) * background
+            return image[..., :3] 
+            # return alpha * image[..., :3] + (1 - alpha) * background
         else:
             return image
 
@@ -950,6 +962,13 @@ class Splatfacto2dModel(Model):
             avg_grad_norm = (self.xys_grad_norm / self.vis_counts) # * 0.5 * max(self.last_size[0], self.last_size[1])
             high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
             metrics_dict["high_grads"] = high_grads.sum().item() / high_grads.shape[0]
+
+        rend_dist = outputs["rend_dist"]
+        rend_normal  = outputs['rend_normal']
+        surf_normal = outputs['surf_normal']
+        normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
+        metrics_dict["normal_reg"] = (normal_error).mean().item()
+        metrics_dict["dist_reg"] = (rend_dist).mean().item()
         
         return metrics_dict
 
@@ -1082,7 +1101,7 @@ class Splatfacto2dModel(Model):
         return metrics_dict, images_dict
 
     # @torch.no_grad()
-    def prepare_rasterizer(self, camera: Cameras, 
+    def prepare_rasterizer(self, camera: Cameras, background,
                            clone_param:bool=False, power:int=1, use_modify=False) -> Tuple[GaussianRasterizer, List[torch.Tensor]]:
         """Takes in a Ray Bundle and returns a dictionary of outputs.
 
@@ -1146,6 +1165,8 @@ class Splatfacto2dModel(Model):
             viewdirs = means_crop.detach() - camera.camera_to_worlds.detach()[..., :3, 3]  # (N, 3)
             viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
             n = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
+        else:
+            n = 0
 
         opacities = torch.sigmoid(opacities_crop)
 
@@ -1153,7 +1174,7 @@ class Splatfacto2dModel(Model):
         fovy = 2 * torch.atan(camera.height / (2 * camera.fy))
         tanfovx = math.tan(fovx * 0.5)
         tanfovy = math.tan(fovy * 0.5)
-        bg_color = torch.tensor([0., 0., 0.], dtype=torch.float32, device="cuda")
+        # bg_color = torch.tensor([0., 0., 0.], dtype=torch.float32, device="cuda")
         scaling_modifier = 1.
         projmat = getProjectionMatrix(0.01, 100., fovx, fovy).cuda()
 
@@ -1163,7 +1184,7 @@ class Splatfacto2dModel(Model):
             image_width=int(camera.width),
             tanfovx=tanfovx,
             tanfovy=tanfovy,
-            bg=bg_color,
+            bg=background,
             scale_modifier=scaling_modifier,
             viewmatrix=viewmat.t(),
             projmatrix=viewmat.t() @ projmat.t(),
@@ -1243,7 +1264,9 @@ class Splatfacto2dModel(Model):
         H: list of diag hessian on gaussians in the order of:
             means3D, shs, opacities, scales, rotations
         """
-        rasterizer, params = self.prepare_rasterizer(camera, power=2, clone_param=True, use_modify=True)
+        # import pdb; pdb.set_trace()
+        backgournd = self.get_background()
+        rasterizer, params = self.prepare_rasterizer(camera, backgournd, power=2, clone_param=True, use_modify=True)
         means3D, shs, opacities, scales, rotations = params
 
         # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
@@ -1265,7 +1288,7 @@ class Splatfacto2dModel(Model):
                 rotations=rotations,
                 cov3D_precomp=None)
             
-            rendered_image.backward(gradient=0.001 * torch.ones_like(rendered_image))
+            rendered_image.backward(gradient=torch.ones_like(rendered_image))
             
         cur_H = [p.grad.detach().clone() for p in params] #type: ignore
             
@@ -1330,8 +1353,9 @@ class Splatfacto2dModel(Model):
             rotations=rotations_m,
             cov3D_precomp=None)
         
-        rendered_image_m.backward(0.01 * torch.ones_like(rendered_image_m))
-
+        loss_m = torch.sum(rendered_image_m)
+        loss_m.backward()
+        
         print("Normal Render ...")
         # Run the Modified Render again to compute gradient
         rasterizer, params = self.prepare_rasterizer(camera, clone_param=True)
@@ -1354,7 +1378,8 @@ class Splatfacto2dModel(Model):
             rotations=rotations,
             cov3D_precomp=None)
         
-        rendered_image.backward(0.01 * torch.ones_like(rendered_image))
+        loss = torch.sum(rendered_image)
+        loss.backward()
 
         import pdb; pdb.set_trace()
         assert torch.allclose(means3D.grad, means3D_m.grad, atol=1e-5, rtol=1e-5), "Gradient of means3D is not equal"

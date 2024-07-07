@@ -36,6 +36,7 @@ from nerfstudio.data.utils.dataparsers_utils import (
     get_train_eval_split_filename,
     get_train_eval_split_fraction,
     get_train_eval_split_interval,
+    getNerfppNorm
 )
 from nerfstudio.process_data.colmap_utils import parse_colmap_camera_params
 from nerfstudio.utils.rich_utils import CONSOLE, status
@@ -147,7 +148,6 @@ class ColmapDataParser(DataParser):
 
         # Parse frames
         # we want to sort all images based on im_id
-        # import pdb; pdb.set_trace()
         ordered_im_id = sorted(im_id_to_image.keys())
         for im_id in ordered_im_id:
             im_data = im_id_to_image[im_id]
@@ -307,6 +307,9 @@ class ColmapDataParser(DataParser):
             center_method=self.config.center_method,
         )
 
+        # get scene extent
+        scene_extent = getNerfppNorm(poses)
+
         # Scale poses
         scale_factor = 1.0
         if self.config.auto_scale_poses:
@@ -382,6 +385,7 @@ class ColmapDataParser(DataParser):
             metadata={
                 "depth_filenames": depth_filenames if len(depth_filenames) > 0 else None,
                 "depth_unit_scale_factor": self.config.depth_unit_scale_factor,
+                "extent": scene_extent["radius"],
                 **metadata,
             },
         )
