@@ -27,7 +27,7 @@ SCENE=${DTU_SCENES[$SLURM_ARRAY_TASK_ID]}
 SCENE_ID=${SCENE:4}
 echo "Scene ID is ${SCENE_ID}"
 
-EXP_NAME=$1
+ACTIVE=$1
 DATADIR=/mnt/kostas-graid/datasets/boshu/DTU/DTU/${SCENE}
 
 # If directory 'colmap' exists, then skip, else create directory
@@ -46,22 +46,24 @@ ns-train splatfacto2d --vis viewer+tensorboard  \
             --data /mnt/kostas-graid/datasets/boshu/DTU/DTU/${SCENE}/ \
             --pipeline.model.densify-grad-thresh 0.00015 \
             --pipeline.model.stop-screen-size-at 30000 \
-             --pipeline.model.stop_split_at 24000 \
+            --pipeline.model.stop_split_at 20000 \
             --pipeline.model.num-cluster 1 \
             --pipeline.model.voxel-size 0.004 \
             --pipeline.model.sdf-trunc 0.016 \
-            --experiment-name  ${SCENE}_${EXP_NAME} \
+            --experiment-name  ${SCENE}_${ACTIVE}_s1 \
             --pipeline.model.lambda_dist 1000 \
             --pipeline.model.lambda_normal 0.05 \
             --pipeline.model.depth-trunc 3.0 \
             --pipeline.model.background_color black \
+            --pipeline.model.normal_reg_start_step 1000 \
+            --pipeline.model.dist_reg_start_step 1000 \
             --viewer.quit-on-train-completion True \
             --pipeline.datamanager.camera_res_scale_factor 0.5 \
-            --pipeline.datamanager.start_img_num 4 \
-            --pipeline.datamanager.batch_select_num 1 \
+            --pipeline.datamanager.start_img_num 2 \
+            --pipeline.datamanager.batch_select_num 2 \
             --pipeline.datamanager.final_img_num 10 \
             --pipeline.datamanager.select_step 3000 \
-            --pipeline.datamanager.select-method Fisher \
+            --pipeline.datamanager.select-method ${ACTIVE} \
             --pipeline.model.continue_cull_post_densification False colmap
 
 

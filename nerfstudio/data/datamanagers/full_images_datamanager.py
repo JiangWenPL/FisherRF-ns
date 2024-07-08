@@ -140,7 +140,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         # self.train_unseen_cameras_subset = random.sample(self.train_unseen_cameras, 4)
         if self.config.start_img_num > 0:
             # deterministic start
-            self.train_seen_cameras_subset = [0, 5, 10, 15]
+            self.train_seen_cameras_subset = [5 * i for i in range(self.config.start_img_num)]
             self.original_subset = deepcopy(self.train_seen_cameras_subset)
             self.train_unseen_cameras = [k for k in self.train_unseen_cameras if k not in self.train_seen_cameras_subset]
         else:

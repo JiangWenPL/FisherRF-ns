@@ -242,6 +242,10 @@ class Splatfacto2dModelConfig(ModelConfig):
     """ depth loss type """
     lambda_dist: float = 0.
     """ weight for dist loss """
+    normal_reg_start_step: int = 7000
+    """ start step for normal regularization """
+    dist_reg_start_step: int = 3000
+    """ start step for dist regularization """
     stop_split_at: int = 15000
     """stop splitting at this step"""
     sh_degree: int = 3
@@ -250,7 +254,7 @@ class Splatfacto2dModelConfig(ModelConfig):
     """If enabled, a scale regularization introduced in PhysGauss (https://xpandora.github.io/PhysGaussian/) is used for reducing huge spikey gaussians."""
     render_uncertainty: bool = False
     """whether or not to render uncertainty during GS training. NOTE: This will slow down training significantly."""
-    depth_uncertainty_weight: float = 1.0
+    depth_uncertainty_weight: float = 0.0
     """weight of depth uncertainty with the Hessian"""
     rgb_uncertainty_weight: float = 1.0
     """weight of rgb uncertainty with the Hessian"""
@@ -1008,8 +1012,8 @@ class Splatfacto2dModel(Model):
         Ll1 = (1 - self.config.ssim_lambda) * torch.abs(gt_img - pred_img).mean()
         ssimloss = self.config.ssim_lambda * (1 - self.ssim(gt_img.permute(2, 0, 1)[None, ...], pred_img.permute(2, 0, 1)[None, ...]))
         
-        lambda_normal = self.config.lambda_normal if self.step >= 7000 else 0.
-        lambda_dist = self.config.lambda_dist if self.step >= 3000 else 0.
+        lambda_normal = self.config.lambda_normal if self.step >= self.config.normal_reg_start_step else 0.
+        lambda_dist = self.config.lambda_dist if self.step >= self.config.dist_reg_start_step else 0.
 
         rend_dist = outputs["rend_dist"]
         rend_normal  = outputs['rend_normal']
@@ -1287,8 +1291,36 @@ class Splatfacto2dModel(Model):
                 scales=scales,
                 rotations=rotations,
                 cov3D_precomp=None)
+
+            # additional regularizations
+            render_alpha = allmap[1:2]
+
+            # get normal map
+            # transform normal from view space to world space
+            render_normal = allmap[2:5]
+            R = camera.camera_to_worlds[0, :3, :3]
+            render_normal = (render_normal.permute(1,2,0) @ (R.T)).permute(2,0,1)
             
-            rendered_image.backward(gradient=torch.ones_like(rendered_image))
+            # get median depth map
+            render_depth_median = allmap[5:6]
+            render_depth_median = torch.nan_to_num(render_depth_median, 0, 0)
+
+            # get expected depth map
+            render_depth_expected = allmap[0:1]
+            render_depth_expected = (render_depth_expected / render_alpha)
+            render_depth_expected = torch.nan_to_num(render_depth_expected, 0, 0)
+
+            # psedo surface attributes
+            # surf depth is either median or expected by setting depth_ratio to 1 or 0
+            # for bounded scene, use median depth, i.e., depth_ratio = 1; 
+            # for unbounded scene, use expected depth, i.e., depth_ration = 0, to reduce disk anliasing.
+            surf_depth = render_depth_expected * (1 - self.config.depth_ratio) + (self.config.depth_ratio) * render_depth_median
+        
+            output = torch.cat([rendered_image, surf_depth], dim=0)
+            output_grad = torch.cat([ self.config.rgb_uncertainty_weight * torch.ones_like(rendered_image), 
+                                     self.config.depth_uncertainty_weight * torch.ones_like(surf_depth)], dim=0)
+
+            output.backward(output_grad)
             
         cur_H = [p.grad.detach().clone() for p in params] #type: ignore
             
