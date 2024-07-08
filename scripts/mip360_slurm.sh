@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus=1
 #SBATCH --nodes=1
-##SBATCH --array=0-5
+#SBATCH --array=0-5
 #SBATCH --partition=batch
 #SBATCH --qos=normal
 ##SBATCH -w=kd-a40-0.grasp.maas
@@ -22,11 +22,26 @@ echo $SLURM_ARRAY_TASK_ID '/' $SLURM_ARRAY_TASK_COUNT '/ Job ID' $SLURM_JOBID
 source /mnt/kostas-graid/sw/envs/boshu/miniconda3/bin/activate gaussian2d
 cd ~/FisherRF-ns
 
+SCENES=("bicycle" "bonsai" "counter" "kitchen" "room" "stump")
+SCENE=${SCENES[$SLURM_ARRAY_TASK_ID]}
+
 SEED=$1
 ACTIVE=$2
 
+DATADIR=/mnt/kostas-graid/datasets/boshu/360_v2/${SCENE}
+
+# If directory 'colmap' exists, then skip, else create directory
+if [ -x "${DATADIR}/colmap" ]; then
+    echo "Directory 'colmap' exists."
+else
+    mkdir -p ${DATADIR}/colmap
+    echo "Directory 'colmap' created."
+
+    ln -s ${DATADIR}/sparse ${DATADIR}/colmap/sparse
+fi
+
 ns-train splatfacto2d --vis viewer+tensorboard  \
-            --data /mnt/kostas-graid/datasets/boshu/360_v2/garden/ \
+            --data /mnt/kostas-graid/datasets/boshu/360_v2/${SCENE}/ \
             --machine.seed ${SEED} \
             --pipeline.model.densify_grad_thresh 0.00020 \
             --pipeline.model.stop-screen-size-at 30000 \
@@ -34,7 +49,7 @@ ns-train splatfacto2d --vis viewer+tensorboard  \
             --pipeline.model.num-cluster 1 \
             --pipeline.model.voxel-size 0.004 \
             --pipeline.model.sdf-trunc 0.016 \
-            --experiment-name garden_${ACTIVE}_seed_${SEED} \
+            --experiment-name ${SCENE}_${ACTIVE}_seed_${SEED} \
             --pipeline.model.lambda_normal 0.05 \
             --pipeline.model.depth-trunc 3.0 \
             --viewer.quit-on-train-completion True \
