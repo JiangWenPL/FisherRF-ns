@@ -24,6 +24,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Type, Union, Iterable
 
+import cv2
 from matplotlib import pyplot as plt
 import numpy as np
 import torch
@@ -57,7 +58,9 @@ from einops import repeat, reduce, rearrange
 from modified_diff_gaussian_rasterization_depth import GaussianRasterizer as ModifiedGaussianRasterizer
 from modified_diff_gaussian_rasterization_depth import GaussianRasterizationSettings
 
-from nerfstudio.models.splatfacto import SplatfactoModel, SplatfactoModelConfig
+from nerfstudio.models.splatfacto import SplatfactoModel, SplatfactoModelConfig, random_quat_tensor
+
+import open3d as o3d
 
 @dataclass
 class DepthSplatfactoModelConfig(SplatfactoModelConfig):
@@ -100,7 +103,8 @@ class DepthSplatfactoModel(SplatfactoModel):
     ):
         self.seed_points = seed_points
         
-        self.lifted_depths = np.zeros(40)
+        self.lifted_depths = np.zeros(100)
+        self.new_gauss_params = None
         
         super().__init__(*args, **kwargs)
 
@@ -113,7 +117,7 @@ class DepthSplatfactoModel(SplatfactoModel):
         )
         return self.depth_sigma
     
-    def depth_to_point_cloud(self, depth_image, intrinsics, extrinsics):
+    def depth_to_point_cloud(self, depth_image, intrinsics, R, t):
         """
         Convert a depth image to a point cloud using camera intrinsics and extrinsics.
 
@@ -125,16 +129,83 @@ class DepthSplatfactoModel(SplatfactoModel):
         Returns:
         np.array: Point cloud (N x 3)
         """
+        # convert depth image to np
+        depth_image = depth_image.cpu().numpy()
+        # remove last dim
+        depth_image = np.squeeze(depth_image)
         height, width = depth_image.shape
-        i, j = np.meshgrid(np.arange(width), np.arange(height), indexing='xy')
-        z = depth_image.flatten()
-        x = (i.flatten() - intrinsics[0, 2]) * z / intrinsics[0, 0]
-        y = (j.flatten() - intrinsics[1, 2]) * z / intrinsics[1, 1]
+        # resize depth image to double
+        depth_image = cv2.resize(depth_image, (2 * width, 2 * height), interpolation=cv2.INTER_NEAREST)
+        # depth_image = depth_image * 1.8628749796804118
+        # depth_image =  depth_image * 1.809021658272585
+        # depth_image = depth_image * 2.2510745700277512
+        # depth_image = depth_image * 2.644739952359983
+        cx = intrinsics[0, 2] * 2
+        cy = intrinsics[1, 2] * 2
+        fx = intrinsics[0, 0] * 2
+        fy = intrinsics[1, 1] * 2
+        
+        points = []
+        for v in range(depth_image.shape[0]):
+            for u in range(depth_image.shape[1]):
+                if depth_image[v, u] == 0: 
+                    continue  # Skip no depth
+                Z = depth_image[v, u] 
+                if Z == 0: continue  # Skip no depth
+                X = (u - cx) * Z / fx
+                Y = (v - cy) * Z / fy
+                points.append([X, Y, Z])
+                
+        
+        t = np.array([[t[0]], [t[1]], [t[2]]])  # translation vector
+        R = R @ np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])  # Example rotation matrix
 
-        points = np.vstack((x, y, z, np.ones_like(z)))
-        point_cloud = (extrinsics @ points)[:3].T
-        return point_cloud
-    
+        point_cloud = np.dot(R, np.transpose(points)) + t
+        point_cloud = np.transpose(point_cloud)
+        
+        point_cloud_tensor = torch.tensor(point_cloud).to(self.device).float()
+        
+        # only take a subset of the points (5 percent randomly)
+        num_points = point_cloud_tensor.shape[0]
+        num_points_to_take = int(0.001 * num_points)
+        
+        indices = torch.randperm(num_points)[:num_points_to_take]
+        point_cloud_tensor = point_cloud_tensor[indices]
+            
+        # lift gaussians to 3d
+        means = point_cloud_tensor
+        
+        distances, _ = self.k_nearest_sklearn(means.data, 3)
+        distances = torch.from_numpy(distances)
+        # find the average of the three nearest neighbors for each point and use that as the scale
+        avg_dist = distances.mean(dim=-1, keepdim=True).float()
+        scales = torch.nn.Parameter(torch.log(avg_dist.repeat(1, 3)))
+        num_points = means.shape[0]
+        quats = torch.nn.Parameter(random_quat_tensor(num_points))
+        dim_sh = num_sh_bases(self.config.sh_degree)
+        
+        features_dc = torch.nn.Parameter(torch.rand(num_points, 3))
+        features_rest = torch.nn.Parameter(torch.zeros((num_points, dim_sh - 1, 3)))
+
+        opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(num_points, 1)))
+        # put everything to device
+        means = means.to(self.device)
+        scales = scales.to(self.device)
+        quats = quats.to(self.device)
+        features_dc = features_dc.to(self.device)
+        features_rest = features_rest.to(self.device)
+        opacities = opacities.to(self.device)
+        
+        self.new_gauss_params = torch.nn.ParameterDict(
+            {
+                "means": means,
+                "scales": scales,
+                "quats": quats,
+                "features_dc": features_dc,
+                "features_rest": features_rest,
+                "opacities": opacities,
+            }
+        )
     
     def populate_modules(self):
         """Set the fields and modules."""
@@ -200,13 +271,28 @@ class DepthSplatfactoModel(SplatfactoModel):
                     fy = camera.fy.cpu().numpy()[0][0]
                     cx = camera.cx.cpu().numpy()[0][0]
                     cy = camera.cy.cpu().numpy()[0][0]
-                    print(fx, fy, cx, cy)
                     intrinsics = np.array([[fx, 0, cx],
                                           [0, fy, cy],
                                           [0,  0,  1]])
                     
+                    extrinsics = extrinsics.cpu().numpy()
+                    extrinsics = extrinsics.squeeze()
+                    extrinsics = np.vstack((extrinsics, np.array([0, 0, 0, 1])))
+                    
+                    # invert transformation matrix
+                    R = extrinsics[:3, :3]
+                    t = extrinsics[:3, 3]
+                    # extrinsics[:3, :3] = R.T
+                    # extrinsics[:3, 3] = -R.T @ t
+                    
+                    R = extrinsics[:3, :3]
+                    t = extrinsics[:3, 3]
+                    
                     # lift depths to 3d
-                    # lifted_gaussians = self.depth_to_point_cloud(termination_depth, intrinsics, extrinsics)
+                    lifted_gaussians = self.depth_to_point_cloud(termination_depth, intrinsics, R, t)
+                else: 
+                    # first time this it hit, set self.new_gauss_params None
+                    self.new_gauss_params = None
    
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
         loss_dict = super().get_loss_dict(outputs, batch, metrics_dict)

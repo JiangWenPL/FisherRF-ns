@@ -256,6 +256,24 @@ def pearson_correlation_depth_loss(
 
     loss = (1 - pearson_corrcoef( predicted_depth, termination_depth))
     return torch.mean(loss)
+    # patch_size = 300
+    # height, width, _ = termination_depth.shape
+    # loss = 0
+    # num_patches = 0
+
+    # for i in range(0, height, patch_size):
+    #     for j in range(0, width, patch_size):
+    #         termination_patch = termination_depth[i:i+patch_size, j:j+patch_size, :]
+    #         predicted_patch = predicted_depth[ i:i+patch_size, j:j+patch_size, :]
+            
+    #         termination_patch = termination_patch.reshape(-1, 1)
+    #         predicted_patch = predicted_patch.reshape(-1, 1)
+            
+    #         patch_loss = 1 - pearson_corrcoef(predicted_patch, termination_patch)
+    #         loss += torch.mean(patch_loss)
+    #         num_patches += 1
+
+    # return loss / num_patches
 
 def ds_nerf_depth_loss(
     weights: Float[Tensor, "*batch num_samples 1"],

@@ -366,28 +366,31 @@ class VanillaPipeline(Pipeline):
         """
         # location of GS inference
         rgb_weight = 1.0
-        depth_weight = 0.005
+        depth_weight = 0.0
+        # depth_weight = 0.005
+        
         
         # ray_bundle, batch = self.datamanager.next_train_subset(step)
         
         ray_bundle, batch = self.datamanager.next_train(step)
         
+        self.model.lift_depths_to_3d(ray_bundle, batch) # type: ignore
         # in the case of GS, ray_bundle is a camera
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
-        self.model.lift_depths_to_3d(ray_bundle, batch) # type: ignore
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
         # check uncertainty and select new views every 2000 steps
-        # option = 'fisher-single-view'
-        # # option = 'random'
+        option = 'fisher-single-view'
+        # option = 'random'
         # if step % 2000 == 1999:
         #     # get the next views
         #     print("Selecting new view for training")
         #     unseen_views  = self.datamanager.get_train_views_not_in_subset()
+        #     print(f"Unseen views: {unseen_views}")
         #     current_views = self.datamanager.get_current_views()
         #     # select the next view
-        #     next_view = self.view_selection(current_views, unseen_views, option='fisher-single-view',
+        #     next_view = self.view_selection(current_views, unseen_views, option=option,
         #                                     rgb_weight=rgb_weight, depth_weight=depth_weight)
             
         #     self.datamanager.add_new_view(next_view) # type: ignore

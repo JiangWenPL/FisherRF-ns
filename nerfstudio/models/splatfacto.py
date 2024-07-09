@@ -424,13 +424,52 @@ class SplatfactoModel(Model):
         optimizer.state[new_params[0]] = param_state
         optimizer.param_groups[0]["params"] = new_params
         del param
+        
+    def dup_in_optim_add_gaussians(self, optimizer, num_gaussians, new_params):
+        """adds the parameters to the optimizer"""
+        param = optimizer.param_groups[0]["params"][0]
+        param_state = optimizer.state[param]
+        
+        avg_shape = param_state["exp_avg"].shape
+        sq_shape = param_state["exp_avg_sq"].shape
+        
+        # to add is based on the second and on dimensions of the existing exp_avg and exp_avg_sq
+        if len(avg_shape) == 2:
+            avg_add = torch.zeros((num_gaussians, avg_shape[1]), device=param.device)
+        else:
+            avg_add = torch.zeros((num_gaussians, avg_shape[1], avg_shape[2]), device=param.device)
+        
+        if "exp_avg" in param_state:
+            param_state["exp_avg"] = torch.cat(
+                [
+                    param_state["exp_avg"],
+                    avg_add,
+                ],
+                dim=0,
+            )
+            param_state["exp_avg_sq"] = torch.cat(
+                [
+                    param_state["exp_avg_sq"],
+                    avg_add,
+                ],
+                dim=0,
+            )
+            
+        
+        del optimizer.state[param]
+        optimizer.state[new_params[0]] = param_state
+        optimizer.param_groups[0]["params"] = new_params
+        del param
 
-    def dup_in_all_optim(self, optimizers, dup_mask, n):
+    def dup_in_all_optim(self, optimizers, dup_mask, n, add_gaussians=False):
         param_groups = self.get_gaussian_param_groups()
         for group, param in param_groups.items():
-            self.dup_in_optim(optimizers.optimizers[group], dup_mask, param, n)
+            if add_gaussians:
+                self.dup_in_optim_add_gaussians(optimizers.optimizers[group], dup_mask.shape[0], param)
+            else:
+                self.dup_in_optim(optimizers.optimizers[group], dup_mask, param, n)
 
-    def after_train(self, step: int):
+    def after_train(self, optimizers: Optimizers, step: int):
         assert step == self.step
         # to save some training time, we no longer need to update those stats post refinement
         if self.step >= self.config.stop_split_at:
@@ -457,6 +496,19 @@ class SplatfactoModel(Model):
                 self.max_2Dsize[visible_mask],
                 newradii / float(max(self.last_size[0], self.last_size[1])),
             )
+            
+        if self.new_gauss_params is not None:
+            for name, param in self.gauss_params.items():
+                self.gauss_params[name] = torch.nn.Parameter(
+                    torch.cat([param.detach(), self.new_gauss_params[name]], dim=0)
+                )
+                
+            idcs = torch.ones(self.new_gauss_params["means"].shape[0], dtype=torch.bool).to(self.device)
+            self.dup_in_all_optim(optimizers, idcs, self.config.n_split_samples, add_gaussians=True)
+
+            self.xys_grad_norm = None
+            self.vis_counts = None
+            self.max_2Dsize = None
 
     def set_crop(self, crop_box: Optional[OrientedBox]):
         self.crop_box = crop_box
@@ -479,7 +531,7 @@ class SplatfactoModel(Model):
                 self.step < self.config.stop_split_at
                 and self.step % reset_interval > self.num_train_data + self.config.refine_every
             )
-            if do_densification:
+            if do_densification and self.xys_grad_norm is not None:
                 # then we densify
                 assert self.xys_grad_norm is not None and self.vis_counts is not None and self.max_2Dsize is not None
                 avg_grad_norm = (self.xys_grad_norm / self.vis_counts) * 0.5 * max(self.last_size[0], self.last_size[1])
@@ -645,6 +697,7 @@ class SplatfactoModel(Model):
             TrainingCallback(
                 [TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
                 self.after_train,
+                args=[training_callback_attributes.optimizers]
             )
         )
         cbs.append(
@@ -776,7 +829,7 @@ class SplatfactoModel(Model):
             features_rest_crop = self.features_rest
             scales_crop = self.scales
             quats_crop = self.quats
-
+            
         colors_crop = torch.cat((features_dc_crop[:, None, :], features_rest_crop), dim=1)
         BLOCK_WIDTH = 16  # this controls the tile size of rasterization, 16 is a good default
         self.xys, depths, self.radii, conics, comp, num_tiles_hit, cov3d = project_gaussians(  # type: ignore

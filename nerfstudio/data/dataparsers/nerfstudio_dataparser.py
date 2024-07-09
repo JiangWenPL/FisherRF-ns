@@ -247,6 +247,9 @@ class Nerfstudio(DataParser):
         scale_factor *= self.config.scale_factor
         
         poses[:, :3, 3] *= scale_factor
+        
+        print(scale_factor)
+        print(indices, split)
 
         # Choose image_filenames and poses based on split, but after auto orient and scaling the poses.
         image_filenames = [image_filenames[i] for i in indices]
