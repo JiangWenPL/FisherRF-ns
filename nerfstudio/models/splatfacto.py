@@ -915,7 +915,6 @@ class SplatfactoModel(Model):
             depth_im = torch.where(alpha > 0, depth_im / alpha, depth_im.detach().max())
 
         # param_names = ['means3D', 'shs', 'opacities', 'scales', 'rotations']
-        # render uncertainty for one camera
         rgb_weight = self.config.rgb_uncertainty_weight
         depth_weight = self.config.depth_uncertainty_weight
         
@@ -925,24 +924,25 @@ class SplatfactoModel(Model):
         
         # if self.training and self.step % 1000 == 0:
         if self.training and self.step % 1000 == 0:
-            uncertainties = self.render_uncertainty_rgb_depth([camera], [camera], rgb_weight=rgb_weight, depth_weight=depth_weight)
-            uncertainty = uncertainties[0].unsqueeze(2)
+            pass
+            # uncertainties = self.render_uncertainty_rgb_depth([camera], [camera], rgb_weight=rgb_weight, depth_weight=depth_weight)
+            # uncertainty = uncertainties[0].unsqueeze(2)
             
-            uncertainty_np = uncertainty.cpu().numpy()
-            plt.imshow(uncertainty_np)
-            plt.savefig(f"uncertainty{self.step}.png")     
+            # uncertainty_np = uncertainty.cpu().numpy()
+            # # plt.imshow(uncertainty_np)
+            # # plt.savefig(f"uncertainty{self.step}.png")     
             
-            rgb_np = rgb.clone().cpu()
-            rgb_np = rgb_np.detach().numpy()
+            # rgb_np = rgb.clone().cpu()
+            # rgb_np = rgb_np.detach().numpy()
             
-            plt.imshow(rgb_np)
-            plt.savefig(f"rgb{self.step}.png")
+            # plt.imshow(rgb_np)
+            # plt.savefig(f"rgb{self.step}.png")
             
-            depth_np = depth_im.clone().cpu() #type: ignore
-            depth_np = depth_np.detach().numpy()
+            # depth_np = depth_im.clone().cpu() #type: ignore
+            # depth_np = depth_np.detach().numpy()
             
-            plt.imshow(depth_np)
-            plt.savefig(f"depth_{self.step}.png")
+            # plt.imshow(depth_np)
+            # plt.savefig(f"depth_{self.step}.png")
             
         if self.config.render_uncertainty:
             return {"rgb": rgb, "depth": depth_im, "accumulation": alpha, "background": background, "uncertainty": uncertainty} # type: ignore

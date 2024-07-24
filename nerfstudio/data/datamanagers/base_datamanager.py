@@ -273,7 +273,7 @@ class DataManager(nn.Module):
         raise NotImplementedError
     
     @abstractmethod
-    def get_cam_data_from_idx(self, idx: int) -> Tuple[Union[RayBundle, Cameras], Dict]:
+    def get_cam_data_from_idx(self, idx: int) -> Tuple[Cameras, Dict]:
         """Returns the camera data from the index.
 
         Args:
@@ -301,6 +301,18 @@ class DataManager(nn.Module):
 
         Args:
             idx: the index of the new view to add
+        Returns:
+            None if success. Raises an exception otherwise.
+        """
+        raise NotImplementedError
+    
+    
+    @abstractmethod
+    def add_new_pose(self) -> None:
+        """Adds a new pose to the training data manager from the whole train dataset to the train subset.
+
+        Args:
+            None
         Returns:
             None if success. Raises an exception otherwise.
         """

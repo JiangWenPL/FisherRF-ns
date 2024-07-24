@@ -60,7 +60,6 @@ from modified_diff_gaussian_rasterization_depth import GaussianRasterizationSett
 
 from nerfstudio.models.splatfacto import SplatfactoModel, SplatfactoModelConfig, random_quat_tensor
 
-import open3d as o3d
 
 @dataclass
 class DepthSplatfactoModelConfig(SplatfactoModelConfig):
@@ -134,11 +133,16 @@ class DepthSplatfactoModel(SplatfactoModel):
         # remove last dim
         depth_image = np.squeeze(depth_image)
         height, width = depth_image.shape
+        
         # resize depth image to double
         depth_image = cv2.resize(depth_image, (2 * width, 2 * height), interpolation=cv2.INTER_NEAREST)
-        # depth_image = depth_image * 1.8628749796804118
+        depth_image = depth_image * 1.8628749796804118
         # depth_image =  depth_image * 1.809021658272585
+        
+        # mirror
         # depth_image = depth_image * 2.2510745700277512
+        
+        # block
         # depth_image = depth_image * 2.644739952359983
         cx = intrinsics[0, 2] * 2
         cy = intrinsics[1, 2] * 2
@@ -165,7 +169,7 @@ class DepthSplatfactoModel(SplatfactoModel):
         
         point_cloud_tensor = torch.tensor(point_cloud).to(self.device).float()
         
-        # only take a subset of the points (5 percent randomly)
+        # only take a subset of the points (0.1 percent randomly)
         num_points = point_cloud_tensor.shape[0]
         num_points_to_take = int(0.001 * num_points)
         

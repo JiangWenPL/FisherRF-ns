@@ -125,12 +125,17 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         # Some logic to make sure we sample every camera in equal amounts
         self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
         
-        # take a small subset of train images
-        # amount of total images in train dataset
         print(len(self.train_unseen_cameras))
         # this is manually selected for now
+        # bunny blender
         self.train_unseen_cameras_subset = [0, 5, 10, 15]
-        # self.train_unseen_cameras_subset = [1, 13, 26, 40]
+        
+        # bunny real
+        # self.train_unseen_cameras_subset = [0, 8, 16, 23]
+        # self.train_unseen_cameras_subset = [1, 4, 8, 12]
+        
+        # mirror
+        # self.train_unseen_cameras_subset = [1, 5, 10, 20, 30, 35, 40, 50, 60, 70, 75]
         
         # self.train_unseen_cameras_subset = [i for i in range(len(self.train_dataset))]
         
@@ -370,6 +375,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         camera.metadata["cam_idx"] = image_idx
         return camera, data
     
+    
     def get_train_views_not_in_subset(self):
         """Get the views not in the subset"""
         
@@ -383,6 +389,17 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
     def add_new_view(self, idx: int) -> None:
         self.original_subset.append(idx)
         self.train_unseen_cameras_subset.append(idx)
+        
+    def add_new_pose(self) -> None:
+        new_idx = len(self.train_dataset)
+        self.original_subset.append(new_idx)
+        self.train_unseen_cameras_subset.append(new_idx)
+        
+        # recreate train and eval dataset
+        self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train")
+        self.train_dataset = self.create_train_dataset()
+        self.eval_dataset = self.create_eval_dataset()
+        self.cached_train, self.cached_eval = self.cache_images(self.config.cache_images)
 
     def next_eval(self, step: int) -> Tuple[Cameras, Dict]:
         """Returns the next evaluation batch
