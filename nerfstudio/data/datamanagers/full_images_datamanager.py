@@ -105,8 +105,9 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         if test_mode == "inference":
             self.dataparser.downscale_factor = 1  # Avoid opening images
         self.includes_time = self.dataparser.includes_time
-
+        
         self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train")
+        
         self.train_dataset = self.create_train_dataset()
         self.eval_dataset = self.create_eval_dataset()
         if len(self.train_dataset) > 500 and self.config.cache_images == "gpu":
@@ -125,7 +126,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         # Some logic to make sure we sample every camera in equal amounts
         self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
         
-        print(len(self.train_unseen_cameras))
+        self.train_unseen_cameras_subset = deepcopy(self.train_unseen_cameras)
         # this is manually selected for now
         # bunny blender
         self.train_unseen_cameras_subset = [0, 5, 10, 15]
@@ -148,6 +149,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         assert len(self.train_unseen_cameras) > 0, "No data found in dataset"
 
         super().__init__()
+
 
     def cache_images(self, cache_images_option):
         cached_train = []

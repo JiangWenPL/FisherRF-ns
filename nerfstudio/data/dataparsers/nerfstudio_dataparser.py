@@ -88,6 +88,7 @@ class Nerfstudio(DataParser):
 
     def _generate_dataparser_outputs(self, split="train"):
         assert self.config.data.exists(), f"Data directory {self.config.data} does not exist."
+        
 
         if self.config.data.suffix == ".json":
             meta = load_from_json(self.config.data)
@@ -181,7 +182,9 @@ class Nerfstudio(DataParser):
                 depth_filepath = Path(frame["depth_file_path"])
                 depth_fname = self._get_fname(depth_filepath, data_dir, downsample_folder_prefix="depths_")
                 depth_filenames.append(depth_fname)
-
+        if "mask_file" in meta:
+            mask_filenames = [self._get_fname(Path(meta["mask_file"]), data_dir) for _ in image_filenames]
+ 
         assert len(mask_filenames) == 0 or (len(mask_filenames) == len(image_filenames)), """
         Different number of image and mask filenames.
         You should check that mask_path is specified for every frame (or zero frames) in transforms.json.
@@ -232,6 +235,7 @@ class Nerfstudio(DataParser):
             CONSOLE.log(f"[yellow] Dataset is overriding orientation method to {orientation_method}")
         else:
             orientation_method = self.config.orientation_method
+            
 
         poses = torch.from_numpy(np.array(poses).astype(np.float32))
         poses, transform_matrix = camera_utils.auto_orient_and_center_poses(
