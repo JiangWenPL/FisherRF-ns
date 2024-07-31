@@ -66,7 +66,7 @@ class DepthSplatfactoModelConfig(SplatfactoModelConfig):
     """Splatfacto Model Config, nerfstudio's implementation of Gaussian Splatting"""
 
     _target: Type = field(default_factory=lambda: DepthSplatfactoModel)
-    depth_loss_mult: float = 0.1
+    depth_loss_mult: float = 0.001
     """Lambda of the depth loss."""
     is_euclidean_depth: bool = False
     """Whether input depth maps are Euclidean distances (or z-distances)."""
@@ -82,7 +82,7 @@ class DepthSplatfactoModelConfig(SplatfactoModelConfig):
     """Depth loss type."""
     uncertainty_weight: float = 0.0
     """Weight of the uncertainty in the loss if uncertainty weighted loss is used."""
-    lift_depths_to_3d: bool = True
+    lift_depths_to_3d: bool = False
     """Whether to lift the depths to 3D."""
 
 class DepthSplatfactoModel(SplatfactoModel):
@@ -116,7 +116,7 @@ class DepthSplatfactoModel(SplatfactoModel):
         )
         return self.depth_sigma
     
-    def depth_to_point_cloud(self, depth_image, intrinsics, R, t):
+    def depth_to_point_cloud(self, depth_image, intrinsics, R, t, scale_factor):
         """
         Convert a depth image to a point cloud using camera intrinsics and extrinsics.
 
@@ -136,14 +136,8 @@ class DepthSplatfactoModel(SplatfactoModel):
         
         # resize depth image to double
         depth_image = cv2.resize(depth_image, (2 * width, 2 * height), interpolation=cv2.INTER_NEAREST)
-        depth_image = depth_image * 1.8628749796804118
-        # depth_image =  depth_image * 1.809021658272585
+        depth_image = depth_image * scale_factor
         
-        # mirror
-        # depth_image = depth_image * 2.2510745700277512
-        
-        # block
-        # depth_image = depth_image * 2.644739952359983
         cx = intrinsics[0, 2] * 2
         cy = intrinsics[1, 2] * 2
         fx = intrinsics[0, 0] * 2
@@ -230,18 +224,27 @@ class DepthSplatfactoModel(SplatfactoModel):
                 raise ValueError(
                     f"Forcing pseudodepth loss, but depth loss type ({self.config.depth_loss_type}) must be one of {losses.PSEUDODEPTH_COMPATIBLE_LOSSES}"
                 )
+            mask = None
+            if "mask" in batch:
+                # batch["mask"] : [H, W, 1]
+                mask = self._downscale_if_required(batch["mask"])
+                mask = mask.to(self.device)
+                # invert mask
+                mask = ~mask
+                assert mask.shape[:2] == outputs["depth"].shape[:2] == outputs["depth"].shape[:2]
+                
             if self.config.depth_loss_type in (DepthLossType.SIMPLE_LOSS,):
                 metrics_dict["depth_loss"] = torch.Tensor([0.0]).to(self.device)
                 
                 termination_depth = batch["depth_image"].to(self.device)
                 metrics_dict["depth_loss"] = basic_depth_loss(
-                    termination_depth, outputs["depth"])
+                    termination_depth, outputs["depth"], mask)
                 
             elif self.config.depth_loss_type in (DepthLossType.PEARSON_LOSS,):
                 metrics_dict["depth_loss"] = torch.Tensor([0.0]).to(self.device)
                 termination_depth = batch["depth_image"].to(self.device)
                 metrics_dict["depth_loss"] = pearson_correlation_depth_loss(
-                    termination_depth, outputs["depth"])
+                    termination_depth, outputs["depth"], mask)
                 
             elif self.config.depth_loss_type in (DepthLossType.DEPTH_UNCERTAINTY_WEIGHTED_LOSS,):
                 metrics_dict["depth_loss"] = torch.Tensor([0.0]).to(self.device)
@@ -259,7 +262,7 @@ class DepthSplatfactoModel(SplatfactoModel):
                 raise NotImplementedError(f"Unknown depth loss type {self.config.depth_loss_type}")
         return metrics_dict
 
-    def lift_depths_to_3d(self, camera: Cameras, batch):
+    def lift_depths_to_3d(self, camera: Cameras, batch, scale_factor: float = 1.0):
         if self.training:
             if self.config.lift_depths_to_3d:
                 termination_depth = batch["depth_image"].to(self.device)
@@ -293,7 +296,7 @@ class DepthSplatfactoModel(SplatfactoModel):
                     t = extrinsics[:3, 3]
                     
                     # lift depths to 3d
-                    lifted_gaussians = self.depth_to_point_cloud(termination_depth, intrinsics, R, t)
+                    self.depth_to_point_cloud(termination_depth, intrinsics, R, t, scale_factor)
                 else: 
                     # first time this it hit, set self.new_gauss_params None
                     self.new_gauss_params = None

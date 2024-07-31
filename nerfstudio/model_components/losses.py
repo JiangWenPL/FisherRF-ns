@@ -230,8 +230,11 @@ def pred_normal_loss(
 def basic_depth_loss(
     termination_depth: Float[Tensor, "*batch 1"],
     predicted_depth: Float[Tensor, "*batch 1"],
+    mask: Optional[Bool[Tensor, "*batch 1"]] = None,
 )-> Float[Tensor, "*batch 1"]:
     # depths are only considered valid if they are greater than 0. 0 depth info means no depth info
+    if mask is not None:
+        termination_depth = termination_depth * mask
     depth_mask = termination_depth > 0
     
     expected_depth_loss = (termination_depth - predicted_depth) ** 2
@@ -245,6 +248,7 @@ def basic_depth_loss(
 def pearson_correlation_depth_loss(
     termination_depth,
     predicted_depth,
+    mask=None,
 )-> Float[Tensor, "*batch 1"]:
     """Pearson correlation depth loss from Few Shot GS
 
@@ -253,8 +257,12 @@ def pearson_correlation_depth_loss(
     """
     termination_depth = termination_depth.reshape(-1, 1)
     predicted_depth = predicted_depth.reshape(-1, 1)
+    if mask is not None:
+        mask = mask.reshape(-1, 1)
+        predicted_depth = predicted_depth[mask]
+        termination_depth = termination_depth[mask]
 
-    loss = (1 - pearson_corrcoef( predicted_depth, termination_depth))
+    loss = (1 - pearson_corrcoef(predicted_depth, termination_depth))
     return torch.mean(loss)
     # patch_size = 300
     # height, width, _ = termination_depth.shape

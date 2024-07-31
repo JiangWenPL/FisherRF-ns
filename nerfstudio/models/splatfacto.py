@@ -1161,14 +1161,14 @@ class SplatfactoModel(Model):
         gt_img = self.composite_with_background(self.get_gt_img(batch["image"]), outputs["background"])
         pred_img = outputs["rgb"]
         
-        
-
         # Set masked part of both ground-truth and rendered image to black.
         # This is a little bit sketchy for the SSIM loss.
         if "mask" in batch:
             # batch["mask"] : [H, W, 1]
             mask = self._downscale_if_required(batch["mask"])
             mask = mask.to(self.device)
+            # invert mask
+            mask = ~mask
             assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2]
             gt_img = gt_img * mask
             pred_img = pred_img * mask

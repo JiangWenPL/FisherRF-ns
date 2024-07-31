@@ -168,7 +168,12 @@ class Nerfstudio(DataParser):
                 )
 
             image_filenames.append(fname)
-            poses.append(np.array(frame["transform_matrix"]))
+            ros_pose = np.array(frame["transform_matrix"])
+            # convert ROS pose to nerfstudio c2w.
+            ros_pose[0:3, 1:3] *= -1
+            # ros_pose = ros_pose[np.array([0, 2, 1, 3]), :]
+            # ros_pose[2, :] *= -1
+            poses.append(ros_pose)
             if "mask_path" in frame:
                 mask_filepath = Path(frame["mask_path"])
                 mask_fname = self._get_fname(
@@ -304,8 +309,6 @@ class Nerfstudio(DataParser):
         metadata = {}
         if (camera_type in [CameraType.FISHEYE, CameraType.FISHEYE624]) and (fisheye_crop_radius is not None):
             metadata["fisheye_crop_radius"] = fisheye_crop_radius
-        if split == 'test':
-            print(poses[-1], 'test')
         cameras = Cameras(
             fx=fx,
             fy=fy,

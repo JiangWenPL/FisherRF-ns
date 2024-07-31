@@ -394,6 +394,7 @@ class VanillaPipeline(Pipeline):
         
     def call_get_nbv_poses(self) -> List[np.ndarray]:
         rospy.wait_for_service('get_poses')
+        rospy.loginfo("Calling service to get NBV poses")
         poses = []
         # make service call to get the list of avail poses
         try:
@@ -409,6 +410,11 @@ class VanillaPipeline(Pipeline):
             
         except rospy.ROSException as e:
             rospy.loginfo(f"Service call failed: {e}")
+            
+        print(f"Poses: {poses}")
+        rospy.sleep(10)    
+        exit()
+            
         return poses # type: ignore
     
     def send_nbv_scores(self, scores) -> bool:
@@ -445,11 +451,11 @@ class VanillaPipeline(Pipeline):
         rgb_weight = 1.0
         depth_weight = 1.0
         
-        ray_bundle, batch = self.datamanager.next_train_subset(step)
+        ray_bundle, batch = self.datamanager.next_train(step)
         
-        # ray_bundle, batch = self.datamanager.next_train(step)
+        depth_scale_factor = self.datamanager.train_dataparser_outputs.dataparser_scale # type: ignore
         
-        self.model.lift_depths_to_3d(ray_bundle, batch) # type: ignore
+        self.model.lift_depths_to_3d(ray_bundle, batch, scale_factor=depth_scale_factor) # type: ignore
         # in the case of GS, ray_bundle is a camera
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
@@ -458,31 +464,33 @@ class VanillaPipeline(Pipeline):
         # check uncertainty and select new views every 2000 steps
         option = 'fisher-single-view'
         # option = 'random'
+        # if step % 2000 == 1999:
         if step % 2000 == 1999:
             # get the next views
+            print("NBV views")
             avail_views = self.call_get_nbv_poses()
             
             # we don't need to check current views as the uncertainty is expected to be low
-            print("Selecting new view for training")
-            unseen_view_idxs  = self.datamanager.get_train_views_not_in_subset()
-            print(f"Unseen views: {unseen_view_idxs}")
-            current_views_idxs = self.datamanager.get_current_views()
-            # select the next view
-            next_view, acq_scores = self.view_selection(current_views_idxs, avail_views, option=option,
-                                            rgb_weight=rgb_weight, depth_weight=depth_weight)
+            # print("Selecting new view for training")
+            # unseen_view_idxs  = self.datamanager.get_train_views_not_in_subset()
+            # print(f"Unseen views: {unseen_view_idxs}")
+            # current_views_idxs = self.datamanager.get_current_views()
+            # # select the next view
+            # next_view, acq_scores = self.view_selection(current_views_idxs, avail_views, option=option,
+            #                                 rgb_weight=rgb_weight, depth_weight=depth_weight)
             
-            # send acquired scores in ROS
-            success = self.send_nbv_scores(acq_scores)
+            # # send acquired scores in ROS
+            # success = self.send_nbv_scores(acq_scores)
             
-            # let the robot move to the next view
-            rate = rospy.Rate(1)  # 1 Hz
-            # loop until GS hits 2k steps and requests a pose
-            while not rospy.is_shutdown() and not self.new_view_ready:
-                rospy.loginfo("GS running...")
-                rate.sleep()
+            # # let the robot move to the next view
+            # rate = rospy.Rate(1)  # 1 Hz
+            # # loop until GS hits 2k steps and requests a pose
+            # while not rospy.is_shutdown() and not self.new_view_ready:
+            #     rospy.loginfo("GS running...")
+            #     rate.sleep()
             
-            if success:
-                self.datamanager.add_new_view(next_view) # type: ignore
+            # if success:
+            #     self.datamanager.add_new_view(next_view) # type: ignore
         
         return model_outputs, loss_dict, metrics_dict
     
