@@ -317,8 +317,6 @@ class VanillaPipeline(Pipeline):
         rospy.loginfo(f"Received request to continue training: {req}")
         self.new_view_ready = True
         
-        self.datamanager.add_new_pose()
-        
         # add new view to the training set
         res = TriggerResponse()
         res.success = True
@@ -377,9 +375,13 @@ class VanillaPipeline(Pipeline):
         
     
     def view_selection(self, training_views: List[int], candidate_views: List[np.ndarray], option='random',
-                       rgb_weight=1.0, depth_weight=1.0) -> Tuple[np.ndarray, List[float]]: # type: ignore
+                       rgb_weight=1.0, depth_weight=1.0) -> Tuple[int, List[float]]: # type: ignore
         if option == 'random':
-            return random.choice(candidate_views), []
+            # construct scores based on number of candidate views
+            scores = [random.random() for _ in range(len(candidate_views))]
+            # get argmax of scores
+            max_idx = scores.index(max(scores))
+            return max_idx, scores
         
         elif option == "fisher-single-view":
             # use fisher information to select the next view
@@ -387,10 +389,16 @@ class VanillaPipeline(Pipeline):
         
         elif option == "fisher-multi-view":
             # batch fisher information to select the next views
-            return candidate_views[0], []
+            scores = [random.random() for _ in range(len(candidate_views))]
+            # get argmax of scores
+            max_idx = scores.index(max(scores))
+            return max_idx, scores
         else:
             # otherwise, select the first view in list. Not recommended.
-            return candidate_views[0], []
+            scores = [random.random() for _ in range(len(candidate_views))]
+            # get argmax of scores
+            max_idx = scores.index(max(scores))
+            return max_idx, scores
         
     def call_get_nbv_poses(self) -> List[np.ndarray]:
         rospy.wait_for_service('get_poses')
@@ -411,21 +419,19 @@ class VanillaPipeline(Pipeline):
         except rospy.ROSException as e:
             rospy.loginfo(f"Service call failed: {e}")
             
-        print(f"Poses: {poses}")
-        rospy.sleep(10)    
-        exit()
             
         return poses # type: ignore
     
     def send_nbv_scores(self, scores) -> bool:
         rospy.wait_for_service('receive_nbv_scores')
         poses = []
+        
         # make service call to get the list of avail poses
         try:
-            send_nbv_scores = rospy.ServiceProxy('receive_nbv_scores', NBVResult)
+            receive_nbv_scores_service = rospy.ServiceProxy('receive_nbv_scores', NBVResult)
             req = NBVResultRequest()
             req.scores = list(scores)
-            response: NBVPosesResponse = send_nbv_scores(req)
+            response: NBVPosesResponse = receive_nbv_scores_service(req)
             
             if response.success:
                 rospy.loginfo(f"Response Message: {response.message}")
@@ -462,8 +468,8 @@ class VanillaPipeline(Pipeline):
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
         # check uncertainty and select new views every 2000 steps
-        option = 'fisher-single-view'
-        # option = 'random'
+        # option = 'fisher-single-view'
+        option = 'random'
         # if step % 2000 == 1999:
         if step % 2000 == 1999:
             # get the next views
@@ -471,26 +477,28 @@ class VanillaPipeline(Pipeline):
             avail_views = self.call_get_nbv_poses()
             
             # we don't need to check current views as the uncertainty is expected to be low
-            # print("Selecting new view for training")
+            print("Selecting new view for training")
             # unseen_view_idxs  = self.datamanager.get_train_views_not_in_subset()
             # print(f"Unseen views: {unseen_view_idxs}")
-            # current_views_idxs = self.datamanager.get_current_views()
-            # # select the next view
-            # next_view, acq_scores = self.view_selection(current_views_idxs, avail_views, option=option,
-            #                                 rgb_weight=rgb_weight, depth_weight=depth_weight)
+            current_views_idxs = self.datamanager.get_current_views()
+            # select the next view
+            next_view, acq_scores = self.view_selection(current_views_idxs, avail_views, option=option,
+                                            rgb_weight=rgb_weight, depth_weight=depth_weight)
             
-            # # send acquired scores in ROS
-            # success = self.send_nbv_scores(acq_scores)
+            print(next_view, acq_scores)
             
-            # # let the robot move to the next view
-            # rate = rospy.Rate(1)  # 1 Hz
-            # # loop until GS hits 2k steps and requests a pose
-            # while not rospy.is_shutdown() and not self.new_view_ready:
-            #     rospy.loginfo("GS running...")
-            #     rate.sleep()
+            # send acquired scores in ROS
+            success = self.send_nbv_scores(acq_scores)
             
-            # if success:
-            #     self.datamanager.add_new_view(next_view) # type: ignore
+            # let the robot move to the next view
+            rate = rospy.Rate(1)  # 1 Hz
+            # loop until GS hits 2k steps and requests a pose
+            while not rospy.is_shutdown() and not self.new_view_ready:
+                rospy.loginfo("GS running in nerfstudio...")
+                rate.sleep()
+            rospy.loginfo("GS taking new view!")
+            if success:
+                self.datamanager.add_new_view(next_view) # type: ignore
         
         return model_outputs, loss_dict, metrics_dict
     

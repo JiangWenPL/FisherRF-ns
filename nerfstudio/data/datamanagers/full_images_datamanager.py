@@ -386,11 +386,21 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
     
     def get_current_views(self):
         """Get the current views"""
-        return self.original_subset
+        return self.train_unseen_cameras
     
     def add_new_view(self, idx: int) -> None:
-        self.original_subset.append(idx)
-        self.train_unseen_cameras_subset.append(idx)
+        """ Adds a new view to the training set. Simply relooks at the transforms.json and adds the new view"""
+        new_idx = len(self.train_dataset)
+        self.original_subset.append(new_idx)
+        self.train_unseen_cameras_subset.append(new_idx)
+        
+        print("New pose added")
+        import time; time.sleep(2)
+        
+        kwargs = {"add_view": True}
+        self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train", **kwargs)
+        
+        # recreate train and eval dataset
         
     def add_new_pose(self) -> None:
         new_idx = len(self.train_dataset)

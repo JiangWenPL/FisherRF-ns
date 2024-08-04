@@ -349,6 +349,7 @@ class Viewer:
     def update_camera_poses(self):
         # TODO this fn accounts for like ~5% of total train time
         # Update the train camera locations based on optimization
+        
         assert self.camera_handles is not None
         if hasattr(self.pipeline.datamanager, "train_camera_optimizer"):
             camera_optimizer = self.pipeline.datamanager.train_camera_optimizer
@@ -425,6 +426,7 @@ class Viewer:
         self.camera_handles: Dict[int, viser.CameraFrustumHandle] = {}
         self.original_c2w: Dict[int, np.ndarray] = {}
         image_indices = self._pick_drawn_image_idxs(len(train_dataset))
+        self.num_cameras = len(image_indices)
         for idx in image_indices:
             image = train_dataset[idx]["image"]
             camera = train_dataset.cameras[idx]
@@ -461,6 +463,46 @@ class Viewer:
 
         self.train_state = train_state
         self.train_util = 0.9
+        
+    def add_last_camera(self, train_dataset: InputDataset) -> None:
+        """Add the last camera to the scene. Useful for active learning"""
+        # if length of dataset is bigger than self.num_cameras
+        if len(train_dataset) > self.num_cameras:
+            self.num_cameras = len(train_dataset)
+            idx = len(train_dataset) - 1
+        
+            # get last image in dataset
+            image = train_dataset[idx]["image"]
+            camera = train_dataset.cameras[idx]
+            image_uint8 = (image * 255).detach().type(torch.uint8)
+            image_uint8 = image_uint8.permute(2, 0, 1)
+            import torchvision
+
+            image_uint8 = torchvision.transforms.functional.resize(image_uint8, 100, antialias=None)  # type: ignore
+            image_uint8 = image_uint8.permute(1, 2, 0)
+            image_uint8 = image_uint8.cpu().numpy()
+            c2w = camera.camera_to_worlds.cpu().numpy()
+            R = vtf.SO3.from_matrix(c2w[:3, :3])
+            R = R @ vtf.SO3.from_x_radians(np.pi)
+            
+            camera_handle = self.viser_server.add_camera_frustum(
+                name=f"/cameras/camera_{idx:05d}",
+                fov=float(2 * np.arctan(camera.cx / camera.fx[0])),
+                scale=self.config.camera_frustum_scale,
+                aspect=float(camera.cx[0] / camera.cy[0]),
+                image=image_uint8,
+                wxyz=R.wxyz,
+                position=c2w[:3, 3] * VISER_NERFSTUDIO_SCALE_RATIO,
+            )
+
+            @camera_handle.on_click
+            def _(event: viser.SceneNodePointerEvent[viser.CameraFrustumHandle]) -> None:
+                with event.client.atomic():
+                    event.client.camera.position = event.target.position
+                    event.client.camera.wxyz = event.target.wxyz
+
+            self.camera_handles[idx] = camera_handle
+            self.original_c2w[idx] = c2w
 
     def update_scene(self, step: int, num_rays_per_batch: Optional[int] = None) -> None:
         """updates the scene based on the graph weights
