@@ -330,31 +330,35 @@ class VanillaPipeline(Pipeline):
         
         sample_cam: Cameras = None # type: ignore
         
+        scale_factor = self.datamanager.train_dataparser_outputs.dataparser_scale  # type: ignore
+        
         for view in training_views:
             # get full camera from view idx
             cam, batch = self.datamanager.get_cam_data_from_idx(view)
-            sample_cam = cam
+            if sample_cam is None:
+                sample_cam = cam
+                
             cur_H: torch.tensor = self.compute_hessian(cam, rgb_weight, depth_weight) # type: ignore
+            
             if H_train is None:
                 H_train = cur_H
             else:
                 H_train += cur_H
                 
         H_train = H_train.to(self.device) # type: ignore
-        # get hessian and combine all hessians of single view.
-        
-        # invert Hessian
         reg_lambda = 1e-6
         I_train = torch.reciprocal(H_train + reg_lambda)
         
-        # have acq scores as list of size of candidate cameras
-        acq_scores = torch.zeros(len(candidate_views))
+        acq_scores = torch.zeros(len(candidate_views)) # type: ignore
+        rospy.loginfo("Hessian computed! Computing NBV...")
         
         # go through each candidate camera and calculate the acq score
         for idx, view_pos in enumerate(tqdm(candidate_views, desc="Computing acq scores")):
             # copy sample_cam and update the pose
             cam = copy.deepcopy(sample_cam)
-            cam.camera_to_worlds = view_pos
+            view_pos = torch.from_numpy(view_pos.astype(np.float32)).to(self.device)
+            view_pos[:3, 3] *= scale_factor
+            cam.camera_to_worlds = view_pos[:3, :4].unsqueeze(0)
             
             cur_H: torch.tensor = self.compute_hessian(cam, rgb_weight, depth_weight) # type: ignore
             I_acq = cur_H
@@ -366,12 +370,11 @@ class VanillaPipeline(Pipeline):
         
         # take max of acq score and return the view idx
         _, indices = torch.sort(acq_scores, descending=True)
-        
         top_idx = indices[0]
         
-        selected_idxs = [candidate_views[top_idx]]
-        print('Selected views:', selected_idxs)
-        return selected_idxs[0], acq_scores.tolist()
+        selected_idx = int(top_idx)
+        print('Selected views:', selected_idx)
+        return selected_idx, acq_scores.tolist()
         
     
     def view_selection(self, training_views: List[int], candidate_views: List[np.ndarray], option='random',
@@ -385,8 +388,9 @@ class VanillaPipeline(Pipeline):
         
         elif option == "fisher-single-view":
             # use fisher information to select the next view
-            selected_view, acq_scores = self.fisher_single_view(training_views, candidate_views, rgb_weight, depth_weight)
-        
+            selected_view, acq_scores = self.fisher_single_view(training_views, candidate_views, rgb_weight, depth_weight) # type: ignore
+            return selected_view, acq_scores # type: ignore
+
         elif option == "fisher-multi-view":
             # batch fisher information to select the next views
             scores = [random.random() for _ in range(len(candidate_views))]
@@ -404,6 +408,7 @@ class VanillaPipeline(Pipeline):
         rospy.wait_for_service('get_poses')
         rospy.loginfo("Calling service to get NBV poses")
         poses = []
+        
         # make service call to get the list of avail poses
         try:
             get_nbv_poses = rospy.ServiceProxy('get_poses', NBVPoses)
@@ -412,15 +417,21 @@ class VanillaPipeline(Pipeline):
             if response.success:
                 rospy.loginfo(f"Response Message: {response.message}")
                 poses: List[PoseStamped] = response.poses
-                poses = [convertPose2Numpy(pose) for pose in poses] # type: ignore
+                ns_poses: List[np.ndarray] = [convertPose2Numpy(pose) for pose in poses] # type: ignore
+                # transform to play nice with nerfstudio
+                final_poses = []
+                for pose in ns_poses:
+                    new_pose = pose
+                    new_pose[0:3, 1:3] *= -1
+                    final_poses.append(new_pose)
+                    
             else: 
                 rospy.loginfo("Failed to get poses. Adding no views")
             
         except rospy.ROSException as e:
             rospy.loginfo(f"Service call failed: {e}")
             
-            
-        return poses # type: ignore
+        return final_poses
     
     def send_nbv_scores(self, scores) -> bool:
         rospy.wait_for_service('receive_nbv_scores')
@@ -453,7 +464,6 @@ class VanillaPipeline(Pipeline):
         Args:
             step: current iteration step to update sampler if using DDP (distributed)
         """
-        # location of GS inference
         rgb_weight = 1.0
         depth_weight = 1.0
         
@@ -467,38 +477,34 @@ class VanillaPipeline(Pipeline):
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
-        # check uncertainty and select new views every 2000 steps
-        # option = 'fisher-single-view'
-        option = 'random'
+        # check uncertainty and select new views every 1000 steps
+        option = 'fisher-single-view'
         # if step % 2000 == 1999:
         if step % 2000 == 1999:
             # get the next views
-            print("NBV views")
             avail_views = self.call_get_nbv_poses()
             
-            # we don't need to check current views as the uncertainty is expected to be low
-            print("Selecting new view for training")
-            # unseen_view_idxs  = self.datamanager.get_train_views_not_in_subset()
-            # print(f"Unseen views: {unseen_view_idxs}")
+            rospy.loginfo("Selecting new view for training")
             current_views_idxs = self.datamanager.get_current_views()
             # select the next view
             next_view, acq_scores = self.view_selection(current_views_idxs, avail_views, option=option,
                                             rgb_weight=rgb_weight, depth_weight=depth_weight)
             
-            print(next_view, acq_scores)
             
             # send acquired scores in ROS
             success = self.send_nbv_scores(acq_scores)
             
-            # let the robot move to the next view
             rate = rospy.Rate(1)  # 1 Hz
             # loop until GS hits 2k steps and requests a pose
             while not rospy.is_shutdown() and not self.new_view_ready:
-                rospy.loginfo("GS running in nerfstudio...")
+                rospy.loginfo("Waiting for Robot Node to Be Done...")
                 rate.sleep()
             rospy.loginfo("GS taking new view!")
             if success:
                 self.datamanager.add_new_view(next_view) # type: ignore
+                print("Added new view succesfully.")
+                # new view is not ready now
+                self.new_view_ready = False
         
         return model_outputs, loss_dict, metrics_dict
     

@@ -125,6 +125,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         # Some logic to make sure we sample every camera in equal amounts
         self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
+        self.train_all_cameras = [i for i in range(len(self.train_dataset))]
         
         self.train_unseen_cameras_subset = deepcopy(self.train_unseen_cameras)
         # this is manually selected for now
@@ -386,7 +387,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
     
     def get_current_views(self):
         """Get the current views"""
-        return self.train_unseen_cameras
+        return self.train_all_cameras
     
     def add_new_view(self, idx: int) -> None:
         """ Adds a new view to the training set. Simply relooks at the transforms.json and adds the new view"""
@@ -404,6 +405,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         print("Length of new eval dataset: ", len(self.eval_dataset))
         
         self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
+        self.train_all_cameras = [i for i in range(len(self.train_dataset))]
         self.original_subset = deepcopy(self.train_unseen_cameras)
         
         
