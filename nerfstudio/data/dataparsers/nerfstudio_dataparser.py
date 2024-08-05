@@ -53,9 +53,9 @@ class NerfstudioDataParserConfig(DataParserConfig):
     """How much to downscale images. If not set, images are chosen such that the max dimension is <1600px."""
     scene_scale: float = 1.0
     """How much to scale the region of interest by."""
-    orientation_method: Literal["pca", "up", "vertical", "none"] = "up"
+    orientation_method: Literal["pca", "up", "vertical", "none"] = "none"
     """The method to use for orientation."""
-    center_method: Literal["poses", "focus", "none"] = "poses"
+    center_method: Literal["poses", "focus", "none"] = "none"
     """The method to use to center the poses."""
     auto_scale_poses: bool = True
     """Whether to automatically scale the poses to fit in +/- 1 bounding box."""
@@ -86,9 +86,11 @@ class Nerfstudio(DataParser):
     config: NerfstudioDataParserConfig
     downscale_factor: Optional[int] = None
 
-    def _generate_dataparser_outputs(self, split="train"):
+    def _generate_dataparser_outputs(self, split="train", **kwargs: Optional[dict]) -> DataparserOutputs:
         assert self.config.data.exists(), f"Data directory {self.config.data} does not exist."
         
+        # check if kwargs is empty
+        add_view = kwargs.get("add_view", False)
 
         if self.config.data.suffix == ".json":
             meta = load_from_json(self.config.data)
@@ -240,32 +242,36 @@ class Nerfstudio(DataParser):
             CONSOLE.log(f"[yellow] Dataset is overriding orientation method to {orientation_method}")
         else:
             orientation_method = self.config.orientation_method
-            
+        
 
         poses = torch.from_numpy(np.array(poses).astype(np.float32))
-        poses, transform_matrix = camera_utils.auto_orient_and_center_poses(
+        poses, transform_matrix = camera_utils.auto_orient_and_center_poses( # type: ignore
             poses,
             method=orientation_method,
-            center_method=self.config.center_method,
-        )
+            center_method=self.config.center_method
+        ) 
         
         # Scale poses
-        scale_factor = 1.0
-        if self.config.auto_scale_poses:
-            scale_factor /= float(torch.max(torch.abs(poses[:, :3, 3])))
-        scale_factor *= self.config.scale_factor
-        
-        poses[:, :3, 3] *= scale_factor
-        
-        print(scale_factor)
-        print(indices, split)
-
+        if not add_view:
+            scale_factor = 1.0
+            if self.config.auto_scale_poses:
+                scale_factor /= float(torch.max(torch.abs(poses[:, :3, 3])))
+            scale_factor *= self.config.scale_factor
+            
+            if not hasattr(self, "scale_factor"):
+                self.scale_factor = scale_factor
+            
+            poses[:, :3, 3] *= self.scale_factor
+        else:
+            poses[:, :3, 3] *= self.scale_factor
+        print("scale_factor", self.scale_factor)
         # Choose image_filenames and poses based on split, but after auto orient and scaling the poses.
         image_filenames = [image_filenames[i] for i in indices]
         mask_filenames = [mask_filenames[i] for i in indices] if len(mask_filenames) > 0 else []
         depth_filenames = [depth_filenames[i] for i in indices] if len(depth_filenames) > 0 else []
 
         idx_tensor = torch.tensor(indices, dtype=torch.long)
+        # get poses of train/test/val split
         poses = poses[idx_tensor]
 
         # in x,y,z order
@@ -348,7 +354,7 @@ class Nerfstudio(DataParser):
 
         if "applied_scale" in meta:
             applied_scale = float(meta["applied_scale"])
-            scale_factor *= applied_scale
+            self.scale_factor *= applied_scale
 
         # reinitialize metadata for dataparser_outputs
         metadata = {}
@@ -409,7 +415,7 @@ class Nerfstudio(DataParser):
                 ply_file_path = None
 
             if ply_file_path:
-                sparse_points = self._load_3D_points(ply_file_path, transform_matrix, scale_factor)
+                sparse_points = self._load_3D_points(ply_file_path, transform_matrix, self.scale_factor)
                 if sparse_points is not None:
                     metadata.update(sparse_points)
             self.prompted_user = True
@@ -419,7 +425,7 @@ class Nerfstudio(DataParser):
             cameras=cameras,
             scene_box=scene_box,
             mask_filenames=mask_filenames if len(mask_filenames) > 0 else None,
-            dataparser_scale=scale_factor,
+            dataparser_scale=self.scale_factor,
             dataparser_transform=dataparser_transform_matrix,
             metadata={
                 "depth_filenames": depth_filenames if len(depth_filenames) > 0 else None,
@@ -428,6 +434,7 @@ class Nerfstudio(DataParser):
                 **metadata,
             },
         )
+        
         return dataparser_outputs
 
     def _load_3D_points(self, ply_file_path: Path, transform_matrix: torch.Tensor, scale_factor: float):
