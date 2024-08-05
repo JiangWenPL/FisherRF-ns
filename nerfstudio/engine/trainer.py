@@ -45,6 +45,10 @@ from nerfstudio.utils.writer import EventName, TimeWriter
 from nerfstudio.viewer.viewer import Viewer as ViewerState
 from nerfstudio.viewer_legacy.server.viewer_state import ViewerLegacyState
 
+import rospy
+from std_srvs.srv import Trigger, TriggerResponse, TriggerRequest
+
+
 TRAIN_INTERATION_OUTPUT = Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor]]
 TORCH_DEVICE = str
 
@@ -293,6 +297,18 @@ class Trainer:
 
         # save checkpoint at the end of training
         self.save_checkpoint(step)
+        # send a service call in ROS that we are done.
+        import pdb; pdb.set_trace()
+        rospy.wait_for_service('finish_training')
+        rospy.loginfo("Calling service to complete training")
+        finish_training_client = rospy.ServiceProxy("/finish_training", Trigger)
+        
+        req = TriggerRequest()
+        res = finish_training_client(req)
+        if res.success:
+            rospy.loginfo("Finished training sent to robot SUCCEEDED.")
+        else:
+            rospy.loginfo("Finished training sent to robot FAILED.")
 
         # write out any remaining events (e.g., total train time)
         writer.write_out_storage()
@@ -351,6 +367,7 @@ class Trainer:
         num_rays_per_batch: int = self.pipeline.datamanager.get_train_rays_per_batch()
         try:
             self.viewer_state.update_scene(step, num_rays_per_batch)
+            self.viewer_state.add_last_camera(self.pipeline.datamanager.train_dataset) # type: ignore
         except RuntimeError:
             time.sleep(0.03)  # sleep to allow buffer to reset
             CONSOLE.log("Viewer failed. Continuing training.")
