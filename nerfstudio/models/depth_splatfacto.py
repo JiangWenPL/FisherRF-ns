@@ -82,7 +82,7 @@ class DepthSplatfactoModelConfig(SplatfactoModelConfig):
     """Depth loss type."""
     uncertainty_weight: float = 0.0
     """Weight of the uncertainty in the loss if uncertainty weighted loss is used."""
-    lift_depths_to_3d: bool = False
+    lift_depths_to_3d: bool = True
     """Whether to lift the depths to 3D."""
 
 class DepthSplatfactoModel(SplatfactoModel):
