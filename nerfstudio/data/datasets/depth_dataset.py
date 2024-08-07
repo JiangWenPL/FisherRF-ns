@@ -113,7 +113,6 @@ class DepthDataset(InputDataset):
 
         # Scale depth images to meter units and also by scaling applied to cameras
         scale_factor = self.depth_unit_scale_factor * self._dataparser_outputs.dataparser_scale
-        
 
         depth_image = get_depth_image_from_path(
             filepath=filepath, height=height, width=width, scale_factor=scale_factor

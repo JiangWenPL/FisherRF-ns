@@ -173,8 +173,6 @@ class Nerfstudio(DataParser):
             ros_pose = np.array(frame["transform_matrix"])
             # convert ROS pose to nerfstudio c2w.
             ros_pose[0:3, 1:3] *= -1
-            # ros_pose = ros_pose[np.array([0, 2, 1, 3]), :]
-            # ros_pose[2, :] *= -1
             poses.append(ros_pose)
             if "mask_path" in frame:
                 mask_filepath = Path(frame["mask_path"])

@@ -116,7 +116,7 @@ class DepthSplatfactoModel(SplatfactoModel):
         )
         return self.depth_sigma
     
-    def depth_to_point_cloud(self, depth_image, intrinsics, R, t, scale_factor):
+    def depth_to_point_cloud(self, depth_image, intrinsics, R, t):
         """
         Convert a depth image to a point cloud using camera intrinsics and extrinsics.
 
@@ -136,7 +136,6 @@ class DepthSplatfactoModel(SplatfactoModel):
         
         # resize depth image to double
         depth_image = cv2.resize(depth_image, (2 * width, 2 * height), interpolation=cv2.INTER_NEAREST)
-        depth_image = depth_image * scale_factor
         
         cx = intrinsics[0, 2] * 2
         cy = intrinsics[1, 2] * 2
@@ -165,7 +164,7 @@ class DepthSplatfactoModel(SplatfactoModel):
         
         # only take a subset of the points (0.1 percent randomly)
         num_points = point_cloud_tensor.shape[0]
-        num_points_to_take = int(0.001 * num_points)
+        num_points_to_take = int(0.01 * num_points)
         
         indices = torch.randperm(num_points)[:num_points_to_take]
         point_cloud_tensor = point_cloud_tensor[indices]
@@ -262,7 +261,7 @@ class DepthSplatfactoModel(SplatfactoModel):
                 raise NotImplementedError(f"Unknown depth loss type {self.config.depth_loss_type}")
         return metrics_dict
 
-    def lift_depths_to_3d(self, camera: Cameras, batch, scale_factor: float = 1.0):
+    def lift_depths_to_3d(self, camera: Cameras, batch):
         if self.training:
             if self.config.lift_depths_to_3d:
                 termination_depth = batch["depth_image"].to(self.device)
@@ -296,7 +295,7 @@ class DepthSplatfactoModel(SplatfactoModel):
                     t = extrinsics[:3, 3]
                     
                     # lift depths to 3d
-                    self.depth_to_point_cloud(termination_depth, intrinsics, R, t, scale_factor)
+                    self.depth_to_point_cloud(termination_depth, intrinsics, R, t)
                 else: 
                     # first time this it hit, set self.new_gauss_params None
                     self.new_gauss_params = None
