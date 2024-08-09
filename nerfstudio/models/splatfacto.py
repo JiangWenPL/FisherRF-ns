@@ -36,6 +36,8 @@ from pytorch_msssim import SSIM
 from torch.nn import Parameter
 from typing_extensions import Literal
 
+
+from nerfstudio.cameras.camera_optimizers import CameraOptimizer, CameraOptimizerConfig
 from nerfstudio.cameras.cameras import Cameras
 from nerfstudio.data.scene_box import OrientedBox
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes, TrainingCallbackLocation
@@ -210,6 +212,9 @@ class SplatfactoModelConfig(ModelConfig):
     However, PLY exported with antialiased rasterize mode is not compatible with classic mode. Thus many web viewers that
     were implemented for classic mode can not render antialiased mode PLY properly without modifications.
     """
+    
+    camera_optimizer: CameraOptimizerConfig = field(default_factory=lambda: CameraOptimizerConfig(mode="SO3xR3"))
+    """Config of the camera optimizer to use"""
 
 
 class SplatfactoModel(Model):
@@ -277,6 +282,10 @@ class SplatfactoModel(Model):
                 "features_rest": features_rest,
                 "opacities": opacities,
             }
+        )
+        
+        self.camera_optimizer: CameraOptimizer = self.config.camera_optimizer.setup(
+            num_cameras=self.num_train_data, device="cpu"
         )
 
         # metrics
@@ -728,6 +737,7 @@ class SplatfactoModel(Model):
             Mapping of different parameter groups
         """
         gps = self.get_gaussian_param_groups()
+        self.camera_optimizer.get_param_groups(param_groups=gps)
         return gps
 
     def _get_downscale_factor(self):
@@ -781,7 +791,13 @@ class SplatfactoModel(Model):
         if not isinstance(camera, Cameras):
             print("Called get_outputs with not a camera")
             return {}
+        
         assert camera.shape[0] == 1, "Only one camera at a time"
+        
+        if self.training:
+            optimized_camera_to_world = self.camera_optimizer.apply_to_camera(camera)
+        else :
+            optimized_camera_to_world = camera.camera_to_worlds
 
         background = self.get_background()
         
@@ -798,8 +814,8 @@ class SplatfactoModel(Model):
         camera_downscale = self._get_downscale_factor()
         camera.rescale_output_resolution(1 / camera_downscale)
         # shift the camera to center of scene looking at center
-        R = camera.camera_to_worlds[0, :3, :3]  # 3 x 3
-        T = camera.camera_to_worlds[0, :3, 3:4]  # 3 x 1
+        R = optimized_camera_to_world[0, :3, :3]  # 3 x 3 # type: ignore
+        T = optimized_camera_to_world[0, :3, 3:4]  # 3 x 1 # type: ignore
         # flip the z and y axes to align with gsplat conventions
         R_edit = torch.diag(torch.tensor([1, -1, -1], device=self.device, dtype=R.dtype))
         R = R @ R_edit
@@ -862,7 +878,7 @@ class SplatfactoModel(Model):
             self.xys.retain_grad()
 
         if self.config.sh_degree > 0:
-            viewdirs = means_crop.detach() - camera.camera_to_worlds.detach()[..., :3, 3]  # (N, 3)
+            viewdirs = means_crop.detach() - optimized_camera_to_world.detach()[..., :3, 3]  # (N, 3)
             viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
             n = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
             rgbs = spherical_harmonics(n, viewdirs, colors_crop)
@@ -922,9 +938,9 @@ class SplatfactoModel(Model):
             uncertainties = self.render_uncertainty_rgb_depth([camera], [camera], rgb_weight=rgb_weight, depth_weight=depth_weight)
             uncertainty = uncertainties[0].unsqueeze(2)
         
-        # if self.training and self.step % 1000 == 0:
         if self.training and self.step % 1000 == 0:
             pass
+            # (hack) code to save the images for debugging   
             # uncertainties = self.render_uncertainty_rgb_depth([camera], [camera], rgb_weight=rgb_weight, depth_weight=depth_weight)
             # uncertainty = uncertainties[0].unsqueeze(2)
             
@@ -960,6 +976,11 @@ class SplatfactoModel(Model):
             return {}
         assert camera_.shape[0] == 1, "Only one camera at a time"
         
+        if self.training:
+            optimized_camera_to_world = self.camera_optimizer.apply_to_camera(camera_)
+        else :
+            optimized_camera_to_world = camera_.camera_to_worlds
+        
         background = self.get_background()
         crop_ids = None
         
@@ -969,8 +990,8 @@ class SplatfactoModel(Model):
         camera.rescale_output_resolution(1 / camera_downscale)
         
         # shift the camera to center of scene looking at center
-        R = camera.camera_to_worlds[0, :3, :3]  # 3 x 3
-        T = camera.camera_to_worlds[0, :3, 3:4]  # 3 x 1
+        R = optimized_camera_to_world[0, :3, :3]  # 3 x 3
+        T = optimized_camera_to_world[0, :3, 3:4]  # 3 x 1
         # flip the z and y axes to align with gsplat conventions
         R_edit = torch.diag(torch.tensor([1, -1, -1], device=self.device, dtype=R.dtype))
         R = R @ R_edit
@@ -1025,7 +1046,7 @@ class SplatfactoModel(Model):
         xys_temp.retain_grad()
         
         if self.config.sh_degree > 0:
-            viewdirs = means.detach() - camera.camera_to_worlds.detach()[..., :3, 3]  # (N, 3)
+            viewdirs = means.detach() - optimized_camera_to_world.detach()[..., :3, 3]  # (N, 3)
             viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
             n = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
             rgbs = spherical_harmonics(n, viewdirs, colors)
@@ -1148,6 +1169,8 @@ class SplatfactoModel(Model):
         metrics_dict["psnr"] = self.psnr(predicted_rgb, gt_rgb)
 
         metrics_dict["gaussian_count"] = self.num_points
+        self.camera_optimizer.get_metrics_dict(metrics_dict)
+        
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
@@ -1173,11 +1196,6 @@ class SplatfactoModel(Model):
             gt_img = gt_img * mask
             pred_img = pred_img * mask
             
-        # mask = self._downscale_if_required(self.robot_mask)
-        # mask = mask.to(self.device)
-        # assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2]
-        # gt_img = gt_img * mask
-        # pred_img = pred_img * mask
 
         Ll1 = torch.abs(gt_img - pred_img).mean()
         simloss = 1 - self.ssim(gt_img.permute(2, 0, 1)[None, ...], pred_img.permute(2, 0, 1)[None, ...])
@@ -1193,11 +1211,16 @@ class SplatfactoModel(Model):
             scale_reg = 0.1 * scale_reg.mean()
         else:
             scale_reg = torch.tensor(0.0).to(self.device)
-
-        return {
+        
+        loss_dict = {
             "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss,
             "scale_reg": scale_reg,
         }
+        
+        if self.training:
+            self.camera_optimizer.get_loss_dict(loss_dict)
+        
+        return loss_dict
 
     @torch.no_grad()
     def get_outputs_for_camera(self, camera: Cameras, obb_box: Optional[OrientedBox] = None) -> Dict[str, torch.Tensor]:
@@ -1270,6 +1293,12 @@ class SplatfactoModel(Model):
             print("Called get_outputs with not a camera")
             return {} #type: ignore
         assert camera.shape[0] == 1, "Only one camera at a time"
+        
+        if self.training:
+            optimized_camera_to_world = self.camera_optimizer.apply_to_camera(camera)
+        else :
+            optimized_camera_to_world = camera.camera_to_worlds
+        
 
         # get the background color
         if self.training:
@@ -1291,8 +1320,8 @@ class SplatfactoModel(Model):
         camera_downscale = self._get_downscale_factor()
         camera.rescale_output_resolution(1 / camera_downscale)
         # shift the camera to center of scene looking at center
-        R = camera.camera_to_worlds[0, :3, :3]  # 3 x 3
-        T = camera.camera_to_worlds[0, :3, 3:4]  # 3 x 1
+        R = optimized_camera_to_world[0, :3, :3]  # 3 x 3
+        T = optimized_camera_to_world[0, :3, 3:4]  # 3 x 1
         # flip the z and y axes to align with gsplat conventions
         R_edit = torch.diag(torch.tensor([1, -1, -1], device=self.device, dtype=R.dtype))
         R = R @ R_edit
@@ -1330,7 +1359,7 @@ class SplatfactoModel(Model):
         camera.rescale_output_resolution(camera_downscale)
 
         if self.config.sh_degree > 0:
-            viewdirs = means_crop.detach() - camera.camera_to_worlds.detach()[..., :3, 3]  # (N, 3)
+            viewdirs = means_crop.detach() - optimized_camera_to_world.detach()[..., :3, 3]  # (N, 3)
             viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
             n = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
             rgbs = spherical_harmonics(n, viewdirs, colors_crop)

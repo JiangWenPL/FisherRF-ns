@@ -298,17 +298,17 @@ class Trainer:
         # save checkpoint at the end of training
         self.save_checkpoint(step)
         # send a service call in ROS that we are done.
-        import pdb; pdb.set_trace()
-        rospy.wait_for_service('finish_training')
-        rospy.loginfo("Calling service to complete training")
-        finish_training_client = rospy.ServiceProxy("/finish_training", Trigger)
+        # import pdb; pdb.set_trace()
+        # rospy.wait_for_service('finish_training')
+        # rospy.loginfo("Calling service to complete training")
+        # finish_training_client = rospy.ServiceProxy("/finish_training", Trigger)
         
-        req = TriggerRequest()
-        res = finish_training_client(req)
-        if res.success:
-            rospy.loginfo("Finished training sent to robot SUCCEEDED.")
-        else:
-            rospy.loginfo("Finished training sent to robot FAILED.")
+        # req = TriggerRequest()
+        # res = finish_training_client(req)
+        # if res.success:
+        #     rospy.loginfo("Finished training sent to robot SUCCEEDED.")
+        # else:
+        #     rospy.loginfo("Finished training sent to robot FAILED.")
 
         # write out any remaining events (e.g., total train time)
         writer.write_out_storage()

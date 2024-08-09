@@ -58,6 +58,7 @@ def eval_load_checkpoint(config: TrainerConfig, pipeline: Pipeline) -> Tuple[Pat
         load_step = config.load_step
     load_path = config.load_dir / f"step-{load_step:09d}.ckpt"
     assert load_path.exists(), f"Checkpoint {load_path} does not exist"
+    print(f"Loading checkpoint from {load_path}")
     loaded_state = torch.load(load_path, map_location="cpu")
     pipeline.load_pipeline(loaded_state["pipeline"], loaded_state["step"])
     CONSOLE.print(f":white_check_mark: Done loading checkpoint from {load_path}")
@@ -69,6 +70,7 @@ def eval_setup(
     eval_num_rays_per_chunk: Optional[int] = None,
     test_mode: Literal["test", "val", "inference"] = "test",
     update_config_callback: Optional[Callable[[TrainerConfig], TrainerConfig]] = None,
+    test_on_other_dataset_str: Optional[str] = None,
 ) -> Tuple[TrainerConfig, Pipeline, Path, int]:
     """Shared setup for loading a saved pipeline for evaluation.
 
@@ -87,6 +89,17 @@ def eval_setup(
     """
     # load save config
     config = yaml.load(config_path.read_text(), Loader=yaml.Loader)
+    import pdb; pdb.set_trace()
+    
+    # # hack; fix this later
+    test_on_other_dataset_str = 'home/user/NextBestSense/data/2024-08-06-02-00-25'
+    
+    if test_on_other_dataset_str is not None:
+        # change config such that the path is eval and we only test on the other dataset
+        dataset_path = Path(test_on_other_dataset_str)
+        config.pipeline.datamanager.data = dataset_path
+        config.pipeline.datamanager.dataparser.train_split_fraction=0.0
+        
     assert isinstance(config, TrainerConfig)
 
     config.pipeline.datamanager._target = all_methods[config.method_name].pipeline.datamanager._target
@@ -99,13 +112,15 @@ def eval_setup(
     # load checkpoints from wherever they were saved
     # TODO: expose the ability to choose an arbitrary checkpoint
     config.load_dir = config.get_checkpoint_dir()
+    
 
     # setup pipeline (which includes the DataManager)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     pipeline = config.pipeline.setup(device=device, test_mode=test_mode)
     assert isinstance(pipeline, Pipeline)
     pipeline.eval()
-
+    
     # load checkpointed information
     checkpoint_path, step = eval_load_checkpoint(config, pipeline)
 

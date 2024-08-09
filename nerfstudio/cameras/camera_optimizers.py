@@ -22,6 +22,7 @@ import functools
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Type, Union
 
+import numpy
 import torch
 import tyro
 from jaxtyping import Float, Int
@@ -109,6 +110,30 @@ class CameraOptimizer(nn.Module):
             self.pose_adjustment = torch.nn.Parameter(torch.zeros((num_cameras, 6), device=device))
         else:
             assert_never(self.config.mode)
+            
+    def add_camera(self):
+        """Add camera to camera optimizer"""
+        if self.config.mode == "off":
+            pass
+        elif self.config.mode in ("SO3xR3", "SE3"):
+            # update self.pose_adjustment to have one more row
+            # import pdb; pdb.set_trace()
+            old_pose_adjustment = self.pose_adjustment
+            new_pose_adjustment = torch.nn.Parameter(torch.zeros((self.num_cameras + 1, 6), device=self.device))
+            
+            with torch.no_grad():
+                new_pose_adjustment[:self.num_cameras].copy_(old_pose_adjustment.data)
+
+                if old_pose_adjustment.grad is not None:
+                    # If the old pose adjustment has gradients, copy them as well
+                    new_pose_adjustment.grad = torch.zeros_like(new_pose_adjustment)
+                    new_pose_adjustment.grad[:self.num_cameras].copy_(old_pose_adjustment.grad)
+
+                # Replace the old pose adjustment with the new one
+                self.pose_adjustment = new_pose_adjustment
+
+                # Update the number of cameras
+                self.num_cameras += 1
 
     def forward(
         self,
@@ -151,15 +176,29 @@ class CameraOptimizer(nn.Module):
             raybundle.origins = raybundle.origins + correction_matrices[:, :3, 3]
             raybundle.directions = torch.bmm(correction_matrices[:, :3, :3], raybundle.directions[..., None]).squeeze()
 
-    def apply_to_camera(self, camera: Cameras) -> None:
+    def apply_to_camera(self, camera: Cameras) -> torch.Tensor:
         """Apply the pose correction to the raybundle"""
-        if self.config.mode != "off":
-            assert camera.metadata is not None, "Must provide id of camera in its metadata"
-            assert "cam_idx" in camera.metadata, "Must provide id of camera in its metadata"
-            camera_idx = camera.metadata["cam_idx"]
-            adj = self(torch.tensor([camera_idx], dtype=torch.long, device=camera.device))  # type: ignore
-            adj = torch.cat([adj, torch.Tensor([0, 0, 0, 1])[None, None].to(adj)], dim=1)
-            camera.camera_to_worlds = torch.bmm(camera.camera_to_worlds, adj)
+        if self.config.mode == "off":
+            return camera.camera_to_worlds
+        
+        if camera.metadata is None or "cam_idx" not in camera.metadata:
+            # Viser cameras
+            return camera.camera_to_worlds
+        
+        camera_idx = camera.metadata["cam_idx"]
+        adj = self(torch.tensor([camera_idx], dtype=torch.long)).to(camera.device)  # type: ignore
+        
+        return torch.cat(
+            [
+                # Apply rotation to directions in world coordinates, without touching the origin.
+                # Equivalent to: directions -> correction[:3,:3] @ directions
+                torch.bmm(adj[..., :3, :3], camera.camera_to_worlds[..., :3, :3]),
+                # Apply translation in world coordinate, independently of rotation.
+                # Equivalent to: origins -> origins + correction[:3,3]
+                camera.camera_to_worlds[..., :3, 3:] + adj[..., :3, 3:],
+            ],
+            dim=-1,
+        )
 
     def get_loss_dict(self, loss_dict: dict) -> None:
         """Add regularization"""
@@ -176,8 +215,12 @@ class CameraOptimizer(nn.Module):
     def get_metrics_dict(self, metrics_dict: dict) -> None:
         """Get camera optimizer metrics"""
         if self.config.mode != "off":
-            metrics_dict["camera_opt_translation"] = self.pose_adjustment[:, :3].norm()
-            metrics_dict["camera_opt_rotation"] = self.pose_adjustment[:, 3:].norm()
+            trans = self.pose_adjustment[:, :3].detach().norm(dim=-1)
+            rot = self.pose_adjustment[:, 3:].detach().norm(dim=-1)
+            metrics_dict["camera_opt_translation_max"] = trans.max()
+            metrics_dict["camera_opt_translation_mean"] = trans.mean()
+            metrics_dict["camera_opt_rotation_mean"] = numpy.rad2deg(rot.mean().cpu())
+            metrics_dict["camera_opt_rotation_max"] = numpy.rad2deg(rot.max().cpu())
 
     def get_param_groups(self, param_groups: dict) -> None:
         """Get camera optimizer parameters"""

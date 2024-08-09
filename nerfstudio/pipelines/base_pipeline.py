@@ -468,10 +468,8 @@ class VanillaPipeline(Pipeline):
         
         ray_bundle, batch = self.datamanager.next_train(step)
         
-        depth_scale_factor = self.datamanager.train_dataparser_outputs.dataparser_scale # type: ignore
-        
-        self.model.lift_depths_to_3d(ray_bundle, batch, scale_factor=depth_scale_factor) # type: ignore
-        # in the case of GS, ray_bundle is a camera
+        self.model.lift_depths_to_3d(ray_bundle, batch) # type: ignore
+
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
@@ -479,7 +477,7 @@ class VanillaPipeline(Pipeline):
         # check uncertainty and select new views every 1000 steps
         # option = 'fisher-single-view'
         option = 'random'
-        # if step % 2000 == 1999:
+        
         if step % 2000 == 1999:
             # get the next views
             avail_views = self.call_get_nbv_poses()
@@ -500,6 +498,7 @@ class VanillaPipeline(Pipeline):
             rospy.loginfo("GS taking new view!")
             if success:
                 self.datamanager.add_new_view(next_view) # type: ignore
+                self.model.camera_optimizer.add_camera() # type: ignore
                 print("Added new view succesfully.")
                 # new view is not ready now
                 self.new_view_ready = False
