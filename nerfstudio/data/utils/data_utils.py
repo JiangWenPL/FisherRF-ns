@@ -27,6 +27,15 @@ def get_image_mask_tensor_from_path(filepath: Path, scale_factor: float = 1.0) -
     Utility function to read a mask image from the given path and return a boolean tensor
     """
     pil_mask = Image.open(filepath)
+    cv_mask = cv2.imread(str(filepath), cv2.IMREAD_UNCHANGED)
+    # convert 0, 255 mask to 0, 1 boolean mask
+    if cv_mask is not None:
+        # shape of cv_mask is (H, W)
+        mask = cv_mask == 255
+        # convert to bool tensor
+        mask_tensor = torch.from_numpy(mask).bool()
+        return mask_tensor        
+    
     if scale_factor != 1.0:
         width, height = pil_mask.size
         newsize = (int(width * scale_factor), int(height * scale_factor))
