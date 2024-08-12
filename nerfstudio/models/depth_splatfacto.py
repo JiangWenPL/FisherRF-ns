@@ -106,6 +106,7 @@ class DepthSplatfactoModel(SplatfactoModel):
         self.new_gauss_params = None
         
         super().__init__(*args, **kwargs)
+        
 
     def _get_sigma(self):
         if not self.config.should_decay_sigma:
@@ -130,13 +131,11 @@ class DepthSplatfactoModel(SplatfactoModel):
         """
         # convert depth image to np
         depth_image = depth_image.cpu().numpy()
-        # remove last dim
         depth_image = np.squeeze(depth_image)
         height, width = depth_image.shape
         
         # resize depth image to double
         depth_image = cv2.resize(depth_image, (2 * width, 2 * height), interpolation=cv2.INTER_NEAREST)
-        
         cx = intrinsics[0, 2] * 2
         cy = intrinsics[1, 2] * 2
         fx = intrinsics[0, 0] * 2
@@ -159,19 +158,16 @@ class DepthSplatfactoModel(SplatfactoModel):
 
         point_cloud = np.dot(R, np.transpose(points)) + t
         point_cloud = np.transpose(point_cloud)
-        
         point_cloud_tensor = torch.tensor(point_cloud).to(self.device).float()
         
         # only take a subset of the points (0.1 percent randomly)
         num_points = point_cloud_tensor.shape[0]
         num_points_to_take = int(0.01 * num_points)
-        
         indices = torch.randperm(num_points)[:num_points_to_take]
         point_cloud_tensor = point_cloud_tensor[indices]
             
         # lift gaussians to 3d
         means = point_cloud_tensor
-        
         distances, _ = self.k_nearest_sklearn(means.data, 3)
         distances = torch.from_numpy(distances)
         # find the average of the three nearest neighbors for each point and use that as the scale
@@ -185,7 +181,7 @@ class DepthSplatfactoModel(SplatfactoModel):
         features_rest = torch.nn.Parameter(torch.zeros((num_points, dim_sh - 1, 3)))
 
         opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(num_points, 1)))
-        # put everything to device
+        
         means = means.to(self.device)
         scales = scales.to(self.device)
         quats = quats.to(self.device)
@@ -193,8 +189,7 @@ class DepthSplatfactoModel(SplatfactoModel):
         features_rest = features_rest.to(self.device)
         opacities = opacities.to(self.device)
         
-        self.new_gauss_params = torch.nn.ParameterDict(
-            {
+        params = {
                 "means": means,
                 "scales": scales,
                 "quats": quats,
@@ -202,7 +197,13 @@ class DepthSplatfactoModel(SplatfactoModel):
                 "features_rest": features_rest,
                 "opacities": opacities,
             }
-        )
+        
+        if self.config.learn_object_mask:
+            sam_mask = torch.nn.Parameter(-10 * torch.ones(num_points, 1))
+            sam_mask = sam_mask.to(self.device)
+            params["sam_mask"] = sam_mask
+        
+        self.new_gauss_params = torch.nn.ParameterDict(params)
     
     def populate_modules(self):
         """Set the fields and modules."""
@@ -231,7 +232,7 @@ class DepthSplatfactoModel(SplatfactoModel):
                 # invert mask
                 mask = ~mask
                 assert mask.shape[:2] == outputs["depth"].shape[:2] == outputs["depth"].shape[:2]
-                
+            mask = None
             if self.config.depth_loss_type in (DepthLossType.SIMPLE_LOSS,):
                 metrics_dict["depth_loss"] = torch.Tensor([0.0]).to(self.device)
                 

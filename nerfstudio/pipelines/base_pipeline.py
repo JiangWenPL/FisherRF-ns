@@ -478,7 +478,7 @@ class VanillaPipeline(Pipeline):
         # option = 'fisher-single-view'
         option = 'random'
         
-        if step % 2000 == 1999:
+        if step % 2000 == -1:
             # get the next views
             avail_views = self.call_get_nbv_poses()
             rospy.loginfo("Selecting new view for training")
