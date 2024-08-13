@@ -1439,7 +1439,6 @@ class SplatfactoModel(Model):
             pass
 
         with torch.enable_grad():
-            # rendered_image, radii = rasterizer(
             rendered_image, rendered_depth, radii = rasterizer(
                 means3D=means3D,
                 means2D=screenspace_points,

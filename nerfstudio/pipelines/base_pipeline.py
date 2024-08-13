@@ -475,10 +475,10 @@ class VanillaPipeline(Pipeline):
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
         # check uncertainty and select new views every 1000 steps
-        # option = 'fisher-single-view'
-        option = 'random'
+        option = 'fisher-single-view'
+        # option = 'random'
         
-        if step % 2000 == -1:
+        if step % 2000 == 1999:
             # get the next views
             avail_views = self.call_get_nbv_poses()
             rospy.loginfo("Selecting new view for training")
