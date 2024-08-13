@@ -107,7 +107,8 @@ class CameraOptimizer(nn.Module):
         if self.config.mode == "off":
             pass
         elif self.config.mode in ("SO3xR3", "SE3"):
-            self.pose_adjustment = torch.nn.Parameter(torch.zeros((num_cameras, 6), device=device))
+            # TODO: find a better way to initialize this instead of this hack
+            self.pose_adjustment = torch.nn.Parameter(torch.zeros((100, 6), device=device))
         else:
             assert_never(self.config.mode)
             
@@ -116,24 +117,7 @@ class CameraOptimizer(nn.Module):
         if self.config.mode == "off":
             pass
         elif self.config.mode in ("SO3xR3", "SE3"):
-            # update self.pose_adjustment to have one more row
-            # import pdb; pdb.set_trace()
-            old_pose_adjustment = self.pose_adjustment
-            new_pose_adjustment = torch.nn.Parameter(torch.zeros((self.num_cameras + 1, 6), device=self.device))
-            
-            with torch.no_grad():
-                new_pose_adjustment[:self.num_cameras].copy_(old_pose_adjustment.data)
-
-                if old_pose_adjustment.grad is not None:
-                    # If the old pose adjustment has gradients, copy them as well
-                    new_pose_adjustment.grad = torch.zeros_like(new_pose_adjustment)
-                    new_pose_adjustment.grad[:self.num_cameras].copy_(old_pose_adjustment.grad)
-
-                # Replace the old pose adjustment with the new one
-                self.pose_adjustment = new_pose_adjustment
-
-                # Update the number of cameras
-                self.num_cameras += 1
+            self.num_cameras += 1
 
     def forward(
         self,
@@ -204,8 +188,8 @@ class CameraOptimizer(nn.Module):
         """Add regularization"""
         if self.config.mode != "off":
             loss_dict["camera_opt_regularizer"] = (
-                self.pose_adjustment[:, :3].norm(dim=-1).mean() * self.config.trans_l2_penalty
-                + self.pose_adjustment[:, 3:].norm(dim=-1).mean() * self.config.rot_l2_penalty
+                self.pose_adjustment[:self.num_cameras, :3].norm(dim=-1).mean() * self.config.trans_l2_penalty
+                + self.pose_adjustment[:self.num_cameras, 3:].norm(dim=-1).mean() * self.config.rot_l2_penalty
             )
 
     def get_correction_matrices(self):
@@ -215,8 +199,8 @@ class CameraOptimizer(nn.Module):
     def get_metrics_dict(self, metrics_dict: dict) -> None:
         """Get camera optimizer metrics"""
         if self.config.mode != "off":
-            trans = self.pose_adjustment[:, :3].detach().norm(dim=-1)
-            rot = self.pose_adjustment[:, 3:].detach().norm(dim=-1)
+            trans = self.pose_adjustment[:self.num_cameras, :3].detach().norm(dim=-1)
+            rot = self.pose_adjustment[:self.num_cameras, 3:].detach().norm(dim=-1)
             metrics_dict["camera_opt_translation_max"] = trans.max()
             metrics_dict["camera_opt_translation_mean"] = trans.mean()
             metrics_dict["camera_opt_rotation_mean"] = numpy.rad2deg(rot.mean().cpu())

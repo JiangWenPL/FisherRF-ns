@@ -89,16 +89,15 @@ def eval_setup(
     """
     # load save config
     config = yaml.load(config_path.read_text(), Loader=yaml.Loader)
-    import pdb; pdb.set_trace()
     
     # # hack; fix this later
-    test_on_other_dataset_str = 'home/user/NextBestSense/data/2024-08-06-02-00-25'
+    test_on_other_dataset_str = '/home/user/NextBestSense/data/2024-08-13-01-36-02'
     
     if test_on_other_dataset_str is not None:
         # change config such that the path is eval and we only test on the other dataset
         dataset_path = Path(test_on_other_dataset_str)
         config.pipeline.datamanager.data = dataset_path
-        config.pipeline.datamanager.dataparser.train_split_fraction=0.0
+        config.pipeline.datamanager.dataparser.train_split_fraction=0.2
         
     assert isinstance(config, TrainerConfig)
 
