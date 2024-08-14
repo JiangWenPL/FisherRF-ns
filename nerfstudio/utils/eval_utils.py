@@ -91,7 +91,7 @@ def eval_setup(
     config = yaml.load(config_path.read_text(), Loader=yaml.Loader)
     
     # # hack; fix this later
-    test_on_other_dataset_str = '/home/user/NextBestSense/data/2024-08-13-01-36-02'
+    test_on_other_dataset_str = '/home/user/NextBestSense/data/2024-08-13-23-18-47'
     
     if test_on_other_dataset_str is not None:
         # change config such that the path is eval and we only test on the other dataset

@@ -327,9 +327,7 @@ class VanillaPipeline(Pipeline):
                            rgb_weight=1.0, depth_weight=1.0):
         # construct initial Hessian matrix from the current training data
         H_train = None
-        
         sample_cam: Cameras = None # type: ignore
-        
         scale_factor = self.datamanager.train_dataparser_outputs.dataparser_scale  # type: ignore
         
         for view in training_views:
@@ -475,8 +473,8 @@ class VanillaPipeline(Pipeline):
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
         # check uncertainty and select new views every 1000 steps
-        option = 'fisher-single-view'
-        # option = 'random'
+        # option = 'fisher-single-view'
+        option = 'random'
         
         if step % 2000 == 1999:
             # get the next views
