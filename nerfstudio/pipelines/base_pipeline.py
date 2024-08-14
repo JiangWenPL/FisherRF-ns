@@ -461,7 +461,7 @@ class VanillaPipeline(Pipeline):
         Args:
             step: current iteration step to update sampler if using DDP (distributed)
         """
-        rgb_weight = 1.0
+        rgb_weight = 0.0
         depth_weight = 1.0
         
         ray_bundle, batch = self.datamanager.next_train(step)
