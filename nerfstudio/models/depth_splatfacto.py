@@ -144,14 +144,13 @@ class DepthSplatfactoModel(SplatfactoModel):
         points = []
         for v in range(depth_image.shape[0]):
             for u in range(depth_image.shape[1]):
-                if depth_image[v, u] == 0: 
-                    continue  # Skip no depth
+                if depth_image[v, u] == 0 or depth_image[v, u] < 0:
+                    continue  # Skip no depth or negative depth
                 Z = depth_image[v, u] 
                 if Z == 0: continue  # Skip no depth
                 X = (u - cx) * Z / fx
                 Y = (v - cy) * Z / fy
                 points.append([X, Y, Z])
-                
         
         t = np.array([[t[0]], [t[1]], [t[2]]])  # translation vector
         R = R @ np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])  # Example rotation matrix
