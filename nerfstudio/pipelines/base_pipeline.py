@@ -275,6 +275,14 @@ class VanillaPipeline(Pipeline):
         # ROS specific code
         rospy.init_node('nerf_pipeline', anonymous=True)
         rospy.loginfo("Starting the pipeline node")
+
+        # get random or fisher param
+        self.view_selection_method = rospy.get_param('~view_selection_method', 'random')
+
+        # get views to add 
+        self.views_to_add = rospy.get_param('~views_to_add', 10)
+
+        self.added_views_so_far = 0
         
         self.new_view_ready = False
         # create service to receive 
@@ -472,34 +480,36 @@ class VanillaPipeline(Pipeline):
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
-        # check uncertainty and select new views every 1000 steps
-        # option = 'fisher-single-view'
-        option = 'random'
-        
         if step % 2000 == 1999:
-            # get the next views
-            avail_views = self.call_get_nbv_poses()
-            rospy.loginfo("Selecting new view for training")
-            current_views_idxs = self.datamanager.get_current_views()
+            if self.added_views_so_far < self.views_to_add:
+                # add views to the training set if we can
+                avail_views = self.call_get_nbv_poses()
+                rospy.loginfo("Selecting new view for training")
+                current_views_idxs = self.datamanager.get_current_views()
 
-            next_view, acq_scores = self.view_selection(current_views_idxs, avail_views, option=option,
-                                            rgb_weight=rgb_weight, depth_weight=depth_weight)
-            
-            # send acquired scores in ROS
-            success = self.send_nbv_scores(acq_scores)
-            
-            rate = rospy.Rate(1)  # 1 Hz
-            # loop until GS hits 2k steps and then get ready for a pose
-            while not rospy.is_shutdown() and not self.new_view_ready:
-                rospy.loginfo("Waiting for Robot Node to Be Done...")
-                rate.sleep()
-            rospy.loginfo("GS taking new view!")
-            if success:
-                self.datamanager.add_new_view(next_view) # type: ignore
-                self.model.camera_optimizer.add_camera() # type: ignore
-                print("Added new view succesfully.")
-                # new view is not ready now
-                self.new_view_ready = False
+                next_view, acq_scores = self.view_selection(current_views_idxs, avail_views, option=self.view_selection_method,
+                                                rgb_weight=rgb_weight, depth_weight=depth_weight)
+                
+                # send acquired scores in ROS
+                success = self.send_nbv_scores(acq_scores)
+                
+                rate = rospy.Rate(1)  # 1 Hz
+                # loop until GS hits 2k steps and then get ready for a pose
+                while not rospy.is_shutdown() and not self.new_view_ready:
+                    rospy.loginfo("Waiting for Robot Node to Be Done...")
+                    rate.sleep()
+                rospy.loginfo("GS taking new view!")
+                if success:
+                    self.datamanager.add_new_view(next_view) # type: ignore
+                    self.model.camera_optimizer.add_camera() # type: ignore
+                    print("Added new view succesfully.")
+                    # new view is not ready now
+                    self.new_view_ready = False
+                    self.added_views_so_far += 1
+
+            else:
+                # add new touch!! 
+                pass
         
         return model_outputs, loss_dict, metrics_dict
     
