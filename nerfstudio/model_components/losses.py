@@ -55,6 +55,52 @@ FORCE_PSEUDODEPTH_LOSS = False
 PSEUDODEPTH_COMPATIBLE_LOSSES = (DepthLossType.SPARSENERF_RANKING,)
 
 
+class EdgeAwareTV(nn.Module):
+    """Edge Aware Smooth Loss"""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, depth: Tensor, rgb: Tensor):
+        """
+        Args:
+            depth: [batch, H, W, 1]
+            rgb: [batch, H, W, 3]
+        """
+        grad_depth_x = torch.abs(depth[..., :, :-1, :] - depth[..., :, 1:, :])
+        grad_depth_y = torch.abs(depth[..., :-1, :, :] - depth[..., 1:, :, :])
+
+        grad_img_x = torch.mean(
+            torch.abs(rgb[..., :, :-1, :] - rgb[..., :, 1:, :]), -1, keepdim=True
+        )
+        grad_img_y = torch.mean(
+            torch.abs(rgb[..., :-1, :, :] - rgb[..., 1:, :, :]), -1, keepdim=True
+        )
+
+        grad_depth_x *= torch.exp(-grad_img_x)
+        grad_depth_y *= torch.exp(-grad_img_y)
+
+        return grad_depth_x.mean() + grad_depth_y.mean()
+
+class TVLoss(nn.Module):
+    """TV loss"""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred):
+        """
+        Args:
+            pred: [batch, H, W, 3]
+
+        Returns:
+            tv_loss: [batch]
+        """
+        h_diff = pred[..., :, :-1, :] - pred[..., :, 1:, :]
+        w_diff = pred[..., :-1, :, :] - pred[..., 1:, :, :]
+        return torch.mean(torch.abs(h_diff)) + torch.mean(torch.abs(w_diff))
+
+
 def outer(
     t0_starts: Float[Tensor, "*batch num_samples_0"],
     t0_ends: Float[Tensor, "*batch num_samples_0"],

@@ -46,7 +46,7 @@ from nerfstudio.engine.optimizers import Optimizers
 # need following import for background color override
 from nerfstudio.model_components import renderers
 from nerfstudio.model_components import losses
-from nerfstudio.model_components.losses import DepthLossType, basic_depth_loss, depth_ranking_loss, depth_uncertainty_weighted_loss, pearson_correlation_depth_loss
+from nerfstudio.model_components.losses import DepthLossType, EdgeAwareTV, TVLoss, basic_depth_loss, depth_ranking_loss, depth_uncertainty_weighted_loss, pearson_correlation_depth_loss
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils.colors import get_color
 from nerfstudio.utils.rich_utils import CONSOLE
@@ -70,6 +70,10 @@ class DepthSplatfactoModelConfig(SplatfactoModelConfig):
     """Lambda of the depth loss."""
     is_euclidean_depth: bool = False
     """Whether input depth maps are Euclidean distances (or z-distances)."""
+    use_depth_smooth_loss: bool = True
+    """Whether to enable depth smooth loss or not"""
+    smooth_loss_lambda: float = 10
+    """Regularizer for smooth loss"""
     depth_sigma: float = 0.01
     """Uncertainty around depth values in meters (defaults to 1cm)."""
     should_decay_sigma: bool = False
@@ -208,6 +212,9 @@ class DepthSplatfactoModel(SplatfactoModel):
         """Set the fields and modules."""
         super().populate_modules()
         
+        if self.config.use_depth_smooth_loss:
+            self.smooth_loss = TVLoss()
+        
         if self.config.should_decay_sigma:
             self.depth_sigma = torch.tensor([self.config.starting_depth_sigma])
         else:
@@ -319,6 +326,8 @@ class DepthSplatfactoModel(SplatfactoModel):
                 loss_dict["depth_loss"] = self.config.depth_loss_mult * metrics_dict["depth_loss"]
         # if self.config.depth_loss_mult >= 0.005:
         #     self.config.depth_loss_mult = max(0.005, self.config.depth_loss_mult * 0.9995)
+            if self.config.use_depth_smooth_loss:
+                loss_dict["depth_smooth_loss"] = self.config.smooth_loss_lambda * self.smooth_loss(outputs["depth"])
             
         return loss_dict
 
