@@ -261,17 +261,22 @@ class DepthSplatfactoModel(SplatfactoModel):
                 raise NotImplementedError(f"Unknown depth loss type {self.config.depth_loss_type}")
         return metrics_dict
 
-    def lift_depths_to_3d(self, camera: Cameras, batch):
+    def lift_depths_to_3d(self, camera: Cameras, batch, force=False):
         if self.training:
             if self.config.lift_depths_to_3d:
                 termination_depth = batch["depth_image"].to(self.device)
                 
                 idx = (camera.metadata["cam_idx"]) # type: ignore
                 # check if gaussians from depth image were lifted to 3D
-                if self.lifted_depths[idx] == 0:
+                if self.lifted_depths[idx] == 0 or force:
                     self.lifted_depths[idx] = 1
                     print(f"Added gaussians to 3D-GS for camera {idx}")
-                    extrinsics = camera.camera_to_worlds
+                    optimized_camera_to_world = self.camera_optimizer.apply_to_camera(camera)
+                    # get copy of optimized camera to world
+                    optimized_camera_to_world = optimized_camera_to_world.clone()
+                    # remove grad
+                    optimized_camera_to_world = optimized_camera_to_world.detach()
+                    extrinsics = optimized_camera_to_world
                     
                     fx = camera.fx.cpu().numpy()[0][0]
                     fy = camera.fy.cpu().numpy()[0][0]

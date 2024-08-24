@@ -187,7 +187,7 @@ class SplatfactoModelConfig(ModelConfig):
     """stop splitting at this step"""
     sh_degree: int = 3
     """maximum degree of spherical harmonics to use"""
-    use_scale_regularization: bool = False
+    use_scale_regularization: bool = True
     """If enabled, a scale regularization introduced in PhysGauss (https://xpandora.github.io/PhysGaussian/) is used for reducing huge spikey gaussians."""
     render_uncertainty: bool = False
     """whether or not to render uncertainty during GS training. NOTE: This will slow down training significantly."""
@@ -195,7 +195,7 @@ class SplatfactoModelConfig(ModelConfig):
     """weight of depth uncertainty with the Hessian"""
     rgb_uncertainty_weight: float = 1.0
     """weight of rgb uncertainty with the Hessian"""
-    max_gauss_ratio: float = 10.0
+    max_gauss_ratio: float = 2.5
     """threshold of ratio of gaussian max to min scale before applying regularization
     loss from the PhysGaussian paper
     """
@@ -234,6 +234,7 @@ class SplatfactoModel(Model):
         **kwargs,
     ):
         self.seed_points = seed_points
+        self.reduction_factor = 1
 
         super().__init__(*args, **kwargs)
 
@@ -1222,9 +1223,11 @@ class SplatfactoModel(Model):
             scale_reg = 0.1 * scale_reg.mean()
         else:
             scale_reg = torch.tensor(0.0).to(self.device)
+            
+        main_loss = (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss + (0.1 * mask_loss)
         
         loss_dict = {
-            "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss + (0.1 * mask_loss),
+            "main_loss": main_loss,
             "scale_reg": scale_reg,
         }
         

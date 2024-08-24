@@ -275,13 +275,15 @@ class VanillaPipeline(Pipeline):
         # ROS specific code
         rospy.init_node('nerf_pipeline', anonymous=True)
         rospy.loginfo("Starting the pipeline node")
+        
+        import pdb; pdb.set_trace()
 
         # get random or fisher param
-        self.view_selection_method = rospy.get_param('~view_selection_method', 'random')
+        self.view_selection_method = rospy.get_param('view_selection_method', 'random')
 
         # get views to add 
-        self.views_to_add = rospy.get_param('~views_to_add', 10)
-
+        self.views_to_add = int(rospy.get_param('views_to_add', 10)) # type: ignore
+ 
         self.added_views_so_far = 0
         
         self.new_view_ready = False
@@ -384,7 +386,20 @@ class VanillaPipeline(Pipeline):
         
     
     def view_selection(self, training_views: List[int], candidate_views: List[np.ndarray], option='random',
-                       rgb_weight=1.0, depth_weight=1.0) -> Tuple[int, List[float]]: # type: ignore
+                       rgb_weight=1.0, depth_weight=1.0,
+                       is_touch=False) -> Tuple[int, List[float]]: # type: ignore
+        """
+        Args:
+            training_views (List[int]): List of training views by index.
+            candidate_views (List[np.ndarray]): Candidate views to select from -- a list of poses.
+            option (str, optional): The method of view selection. Either random or fisher. Defaults to 'random'.
+            rgb_weight (float, optional): RGB weight for Fisherrf. Defaults to 1.0.
+            depth_weight (float, optional): Depth weight for Fisherrf. Defaults to 1.0.
+            is_touch (bool, optional): whether the view is a touch view. Defaults to False.
+
+        Returns:
+            Tuple[int, List[float]]: _description_
+        """
         if option == 'random':
             # construct scores based on number of candidate views
             scores = [random.random() for _ in range(len(candidate_views))]
@@ -395,7 +410,7 @@ class VanillaPipeline(Pipeline):
         elif option == "fisher-single-view":
             # use fisher information to select the next view
             selected_view, acq_scores = self.fisher_single_view(training_views, candidate_views, rgb_weight, depth_weight) # type: ignore
-            return selected_view, acq_scores # type: ignore
+            return selected_view, acq_scores # type: ignore 
 
         elif option == "fisher-multi-view":
             # batch fisher information to select the next views
@@ -458,6 +473,16 @@ class VanillaPipeline(Pipeline):
         except rospy.ROSException as e:
             rospy.loginfo(f"Service call failed: {e}")
         return False
+    
+    def run_nbv(self, rgb_weight=1.0, depth_weight=1.0, is_touch=False):
+        avail_views = self.call_get_nbv_poses()
+        rospy.loginfo("Selecting new view for training")
+        current_views_idxs = self.datamanager.get_current_views()
+        
+        next_view, acq_scores = self.view_selection(current_views_idxs, avail_views, option=self.view_selection_method, # type: ignore
+                                                rgb_weight=rgb_weight, depth_weight=depth_weight)
+        
+        return next_view, acq_scores
 
 
     @profiler.time_function
@@ -469,8 +494,6 @@ class VanillaPipeline(Pipeline):
         Args:
             step: current iteration step to update sampler if using DDP (distributed)
         """
-        rgb_weight = 0.0
-        depth_weight = 1.0
         
         ray_bundle, batch = self.datamanager.next_train(step)
         
@@ -480,21 +503,16 @@ class VanillaPipeline(Pipeline):
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
-        if step % 2000 == 1999:
+        if step % 2000 == -1:
+            import pdb; pdb.set_trace()
             if self.added_views_so_far < self.views_to_add:
                 # add views to the training set if we can
-                avail_views = self.call_get_nbv_poses()
-                rospy.loginfo("Selecting new view for training")
-                current_views_idxs = self.datamanager.get_current_views()
-
-                next_view, acq_scores = self.view_selection(current_views_idxs, avail_views, option=self.view_selection_method,
-                                                rgb_weight=rgb_weight, depth_weight=depth_weight)
+                next_view, acq_scores = self.run_nbv(rgb_weight=1.0, depth_weight=1.0, is_touch=False)
                 
                 # send acquired scores in ROS
                 success = self.send_nbv_scores(acq_scores)
                 
                 rate = rospy.Rate(1)  # 1 Hz
-                # loop until GS hits 2k steps and then get ready for a pose
                 while not rospy.is_shutdown() and not self.new_view_ready:
                     rospy.loginfo("Waiting for Robot Node to Be Done...")
                     rate.sleep()
@@ -509,7 +527,30 @@ class VanillaPipeline(Pipeline):
 
             else:
                 # add new touch!! 
-                pass
+                next_view, acq_scores = self.run_nbv(rgb_weight=1.0, depth_weight=1.0, is_touch=True)
+                success = self.send_nbv_scores(acq_scores)
+                
+                rate = rospy.Rate(1)  # 1 Hz
+                while not rospy.is_shutdown() and not self.new_view_ready:
+                    rospy.loginfo("Waiting for Robot Node to Be Done...")
+                    rate.sleep()
+                    
+                rospy.loginfo("GS taking new touch!")
+                
+                if success:
+                    # add Gaussians from touch to the scene, and remove the floaters from the scene during pre-touch.
+                    self.prune_pre_touch_gaussians() # type: ignore
+                    self.update_depths_with_touch() # type: ignore
+                    self.add_touch_gaussians() # type: ignore
+                    
+                    self.datamanager.add_new_view(next_view) # type: ignore
+                    # add DT 'camera'
+                    self.model.camera_optimizer.add_camera() # type: ignore
+                    print("Added new view succesfully.")
+                    self.new_view_ready = False
+                
+                
+            
         
         return model_outputs, loss_dict, metrics_dict
     
