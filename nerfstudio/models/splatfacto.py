@@ -336,9 +336,9 @@ class SplatfactoModelConfig(ModelConfig):
     """Config of the camera optimizer to use"""
     learn_object_mask: bool = True
     """If True, compute the Gaussians associated with an object based on the object mask"""
-    predict_normals: bool = True
+    predict_normals: bool = False
     """If True, predict normals for each gaussian"""
-    normal_lambda: float = 0.0
+    normal_lambda: float = 0.1
     """Regularizer for normal loss"""
 
 
@@ -1414,7 +1414,7 @@ class SplatfactoModel(Model):
         
         # get normal loss
         normal_loss = 0
-        if "normals_image" in batch:
+        if "normals_image" in batch and self.config.predict_normals:
             pred_normal = outputs["normal"]
             
             gt_normal = normal_from_depth_image(
