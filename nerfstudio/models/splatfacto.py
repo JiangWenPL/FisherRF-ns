@@ -336,9 +336,9 @@ class SplatfactoModelConfig(ModelConfig):
     """Config of the camera optimizer to use"""
     learn_object_mask: bool = True
     """If True, compute the Gaussians associated with an object based on the object mask"""
-    predict_normals: bool = False
+    predict_normals: bool = True
     """If True, predict normals for each gaussian"""
-    normal_lambda: float = 0.1
+    normal_lambda: float = 0.2
     """Regularizer for normal loss"""
 
 
