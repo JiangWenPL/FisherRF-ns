@@ -55,6 +55,23 @@ FORCE_PSEUDODEPTH_LOSS = False
 PSEUDODEPTH_COMPATIBLE_LOSSES = (DepthLossType.SPARSENERF_RANKING,)
 
 
+def mean_angular_error(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
+    """Compute the mean angular error between predicted and reference normals
+
+    Args:
+        predicted_normals: [B, C, H, W] tensor of predicted normals
+        reference_normals : [B, C, H, W] tensor of gt normals
+
+    Returns:
+        mae: [B, H, W] mean angular error
+    """
+    dot_products = torch.sum(gt * pred, dim=1)  # over the C dimension
+    # Clamp the dot product to ensure valid cosine values (to avoid nans)
+    dot_products = torch.clamp(dot_products, -1.0, 1.0)
+    # Calculate the angle between the vectors (in radians)
+    mae = torch.acos(dot_products)
+    return mae
+
 class EdgeAwareTV(nn.Module):
     """Edge Aware Smooth Loss"""
 

@@ -50,6 +50,8 @@ from nerfstudio.model_components.losses import DepthLossType, EdgeAwareTV, TVLos
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils.colors import get_color
 from nerfstudio.utils.rich_utils import CONSOLE
+import torch.nn.functional as F
+
 
 from einops import repeat, reduce, rearrange
 # from modified_diff_gaussian_rasterization import GaussianRasterizer as ModifiedGaussianRasterizer
@@ -192,6 +194,13 @@ class DepthSplatfactoModel(SplatfactoModel):
         features_rest = features_rest.to(self.device)
         opacities = opacities.to(self.device)
         
+        # create normals.
+        normals = F.one_hot(torch.argmin(scales, dim=-1), num_classes=3).float()
+        rots = quat_to_rotmat(quats)
+        normals = torch.bmm(rots, normals[:, :, None]).squeeze(-1)
+        normals = F.normalize(normals, dim=1)
+        normals = torch.nn.Parameter(normals.detach())
+        
         params = {
                 "means": means,
                 "scales": scales,
@@ -199,6 +208,7 @@ class DepthSplatfactoModel(SplatfactoModel):
                 "features_dc": features_dc,
                 "features_rest": features_rest,
                 "opacities": opacities,
+                "normals": normals,
             }
         
         if self.config.learn_object_mask:

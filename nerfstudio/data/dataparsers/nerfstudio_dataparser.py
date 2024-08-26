@@ -102,6 +102,7 @@ class Nerfstudio(DataParser):
         image_filenames = []
         mask_filenames = []
         depth_filenames = []
+        normals_filenames = []
         poses = []
 
         fx_fixed = "fl_x" in meta
@@ -132,6 +133,7 @@ class Nerfstudio(DataParser):
             fnames.append(fname)
         inds = np.argsort(fnames)
         frames = [meta["frames"][ind] for ind in inds]
+        
 
         for frame in frames:
             filepath = Path(frame["file_path"])
@@ -187,6 +189,12 @@ class Nerfstudio(DataParser):
                 depth_filepath = Path(frame["depth_file_path"])
                 depth_fname = self._get_fname(depth_filepath, data_dir, downsample_folder_prefix="depths_")
                 depth_filenames.append(depth_fname)
+            
+            if "normals_file_path" in frame:
+                normals_filepath = Path(frame["normals_file_path"])
+                normals_fname = self._get_fname(normals_filepath, data_dir, downsample_folder_prefix="normals_")
+                normals_filenames.append(normals_fname)
+                
         if "mask_file" in meta:
             mask_filenames = [self._get_fname(Path(meta["mask_file"]), data_dir) for _ in image_filenames]
  
@@ -197,6 +205,10 @@ class Nerfstudio(DataParser):
         assert len(depth_filenames) == 0 or (len(depth_filenames) == len(image_filenames)), """
         Different number of image and depth filenames.
         You should check that depth_file_path is specified for every frame (or zero frames) in transforms.json.
+        """
+        assert len(normals_filenames) == 0 or (len(normals_filenames) == len(image_filenames)), """
+        Different number of image and normals filenames.
+        You should check that normals_file_path is specified for every frame (or zero frames) in transforms.json.
         """
 
         has_split_files_spec = any(f"{split}_filenames" in meta for split in ("train", "val", "test"))
@@ -267,6 +279,7 @@ class Nerfstudio(DataParser):
         image_filenames = [image_filenames[i] for i in indices]
         mask_filenames = [mask_filenames[i] for i in indices] if len(mask_filenames) > 0 else []
         depth_filenames = [depth_filenames[i] for i in indices] if len(depth_filenames) > 0 else []
+        normals_filenames = [normals_filenames[i] for i in indices] if len(normals_filenames) > 0 else []
 
         idx_tensor = torch.tensor(indices, dtype=torch.long)
         # get poses of train/test/val split
@@ -417,7 +430,6 @@ class Nerfstudio(DataParser):
                 if sparse_points is not None:
                     metadata.update(sparse_points)
             self.prompted_user = True
-
         dataparser_outputs = DataparserOutputs(
             image_filenames=image_filenames,
             cameras=cameras,
@@ -427,6 +439,7 @@ class Nerfstudio(DataParser):
             dataparser_transform=dataparser_transform_matrix,
             metadata={
                 "depth_filenames": depth_filenames if len(depth_filenames) > 0 else None,
+                "normals_filenames": normals_filenames if len(normals_filenames) > 0 else None,
                 "depth_unit_scale_factor": self.config.depth_unit_scale_factor,
                 "mask_color": self.config.mask_color,
                 **metadata,

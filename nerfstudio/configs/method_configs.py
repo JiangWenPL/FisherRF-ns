@@ -635,6 +635,12 @@ method_configs["splatfacto"] = TrainerConfig(
             "optimizer": AdamOptimizerConfig(lr=0.005, eps=1e-15),
             "scheduler": None,
         },
+        "normals": {
+            "optimizer": AdamOptimizerConfig(
+                lr=1e-3, eps=1e-15
+            ),  # this does nothing, its just here to make the trainer happy
+            "scheduler": None,
+        },
         "quats": {"optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15), "scheduler": None},
         "camera_opt": {
             "optimizer": AdamOptimizerConfig(lr=1e-4, eps=1e-15),
@@ -689,6 +695,12 @@ method_configs["depth-splatfacto"] = TrainerConfig(
         },
         "sam_mask": {
             "optimizer": AdamOptimizerConfig(lr=0.0025, eps=1e-15),
+            "scheduler": None,
+        },
+        "normals": {
+            "optimizer": AdamOptimizerConfig(
+                lr=1e-3, eps=1e-15
+            ),  # this does nothing, its just here to make the trainer happy
             "scheduler": None,
         },
         "quats": {"optimizer": AdamOptimizerConfig(lr=0.001, eps=1e-15), "scheduler": None},

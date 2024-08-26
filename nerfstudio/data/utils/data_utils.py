@@ -68,6 +68,17 @@ def get_semantics_and_mask_tensors_from_path(
     mask = torch.sum(semantics == mask_indices, dim=-1, keepdim=True) == 0
     return semantics, mask
 
+def get_normal_image_from_path(
+    filepath: Path,
+    height: int,
+    width: int,
+    interpolation: int = cv2.INTER_NEAREST,
+) -> torch.Tensor:
+    # read normal image
+    image = cv2.imread(str(filepath.absolute()))
+    image = cv2.resize(image, (width, height), interpolation=interpolation)
+    return torch.tensor(image)
+
 
 def get_depth_image_from_path(
     filepath: Path,

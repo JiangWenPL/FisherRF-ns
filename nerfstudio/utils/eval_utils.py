@@ -92,7 +92,7 @@ def eval_setup(
     
     # # hack; fix this later
     test_on_other_dataset_str = '/home/user/NextBestSense/data/2024-08-15-03-23-17'
-    
+    test_on_other_dataset_str = None
     if test_on_other_dataset_str is not None:
         # change config such that the path is eval and we only test on the other dataset
         dataset_path = Path(test_on_other_dataset_str)

@@ -498,6 +498,7 @@ class VanillaPipeline(Pipeline):
         ray_bundle, batch = self.datamanager.next_train(step)
         
         self.model.lift_depths_to_3d(ray_bundle, batch) # type: ignore
+        self.model.camera = ray_bundle # type: ignore
 
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
