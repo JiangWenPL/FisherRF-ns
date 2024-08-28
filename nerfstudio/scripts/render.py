@@ -59,6 +59,7 @@ from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.rich_utils import CONSOLE, ItersPerSecColumn
 from nerfstudio.utils.scripts import run_command
 
+import cv2
 
 def _render_trajectory_video(
     pipeline: Pipeline,
@@ -133,9 +134,19 @@ def _render_trajectory_video(
         else:
             train_dataset = None
             train_cameras = None
+            
+        # create transforms.json file
+        path = '/home/user/NextBestSense/gs_camera_path/transforms.json'
 
+        # open json file; we will write to it
+        with open(path) as f:
+            data = json.load(f)
+            
+        frames = []
+            
         with progress:
             for camera_idx in progress.track(range(cameras.size), description=""):
+                frame_obj = {}
                 obb_box = None
                 if crop_data is not None:
                     obb_box = crop_data.obb
@@ -192,6 +203,10 @@ def _render_trajectory_video(
                             cameras[camera_idx : camera_idx + 1], obb_box=obb_box
                         )
                 else:
+                    # get the c2w matrix for the camera
+                    c2w = cameras.camera_to_worlds[camera_idx : camera_idx + 1]
+                    frame_obj['transform_matrix'] = c2w.cpu().numpy().tolist()
+                    # convert to numpy 
                     with torch.no_grad():
                         outputs = pipeline.model.get_outputs_for_camera(
                             cameras[camera_idx : camera_idx + 1], obb_box=obb_box
@@ -199,6 +214,7 @@ def _render_trajectory_video(
 
                 render_image = []
                 for rendered_output_name in rendered_output_names:
+                    
                     if rendered_output_name not in outputs:
                         CONSOLE.rule("Error", style="red")
                         CONSOLE.print(f"Could not find {rendered_output_name} in the model outputs", justify="center")
@@ -209,6 +225,13 @@ def _render_trajectory_video(
                     output_image = outputs[rendered_output_name]
                     is_depth = rendered_output_name.find("depth") != -1
                     if is_depth:
+                        depth_image_raw = output_image.cpu().numpy()
+                        depth_image_raw = (depth_image_raw * 1000).astype(np.uint16)
+                        # save depth image as a file
+                        cv2.imwrite(f'/home/user/NextBestSense/gs_camera_path/{camera_idx}_depth.png', depth_image_raw)
+                        # add this to depth file path in frame object
+                        frame_obj['depth_file_path'] = f'/home/user/NextBestSense/gs_camera_path/{camera_idx}_depth.png'
+                        
                         output_image = (
                             colormaps.apply_depth_colormap(
                                 output_image,
@@ -229,8 +252,18 @@ def _render_trajectory_video(
                             .cpu()
                             .numpy()
                         )
+                        
+                        # rgb.. save this as a file
+                        # convert to 0-255
+                        cv_image = (output_image * 255).astype(np.uint8)
+                        # RGB to BGR
+                        cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
+                        cv2.imwrite(f'/home/user/NextBestSense/gs_camera_path/{camera_idx}.png', cv_image)
+                        frame_obj['file_path'] = f'/home/user/NextBestSense/gs_camera_path/{camera_idx}.png'
                     render_image.append(output_image)
-
+                
+                
+                frames.append(frame_obj)
                 # Add closest training image to the right of the rendered image
                 if render_nearest_camera:
                     assert train_dataset is not None
@@ -272,7 +305,12 @@ def _render_trajectory_video(
                             )
                         )
                     writer.add_image(render_image)
-
+        # write to the same json file
+        data['frames'] = frames
+        with open(path, 'w') as f:
+            # tabs
+            json.dump(data, f, indent=4)
+            
     table = Table(
         title=None,
         show_header=False,
@@ -417,7 +455,7 @@ class BaseRender:
     """Scaling factor to apply to the camera image resolution."""
     eval_num_rays_per_chunk: Optional[int] = None
     """Specifies number of rays per chunk during eval. If None, use the value in the config file."""
-    rendered_output_names: List[str] = field(default_factory=lambda: ["rgb"])
+    rendered_output_names: List[str] = field(default_factory=lambda: ["rgb", "depth"])
     """Name of the renderer outputs to use. rgb, depth, etc. concatenates them along y axis"""
     depth_near_plane: Optional[float] = None
     """Closest depth to consider when using the colormap for depth. If None, use min value."""
@@ -744,6 +782,7 @@ class DatasetRender(BaseRender):
         for split in self.split.split("+"):
             datamanager: VanillaDataManager
             dataset: Dataset
+            split = 'train'
             if split == "train":
                 with _disable_datamanager_setup(data_manager_config._target):  # pylint: disable=protected-access
                     datamanager = data_manager_config.setup(test_mode="test", device=pipeline.device)
@@ -810,7 +849,7 @@ class DatasetRender(BaseRender):
 
                         output_path = self.output_path / split / rendered_output_name / image_name
                         output_path.parent.mkdir(exist_ok=True, parents=True)
-
+                        raw_depth = None
                         output_name = rendered_output_name
                         if output_name.startswith("raw-"):
                             output_name = output_name[4:]
@@ -835,6 +874,9 @@ class DatasetRender(BaseRender):
                         if is_raw:
                             output_image = output_image.cpu().numpy()
                         elif is_depth:
+                            
+                            raw_depth = output_image.cpu().numpy()
+                            
                             output_image = (
                                 colormaps.apply_depth_colormap(
                                     output_image,
@@ -867,6 +909,12 @@ class DatasetRender(BaseRender):
                                 media.write_image(
                                     output_path.with_suffix(".jpg"), output_image, fmt="jpeg", quality=self.jpeg_quality
                                 )
+                                if raw_depth is not None:
+                                    # save raw depth as well as png
+                                    raw_depth = (raw_depth * 1000).astype(np.uint16)
+                                    # save as 16-bit png
+                                    import cv2
+                                    cv2.imwrite(str(output_path.with_suffix(".depth.png")), raw_depth)
                             else:
                                 raise ValueError(f"Unknown image format {self.image_format}")
 

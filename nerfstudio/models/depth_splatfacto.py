@@ -123,7 +123,7 @@ class DepthSplatfactoModel(SplatfactoModel):
         )
         return self.depth_sigma
     
-    def depth_to_point_cloud(self, depth_image, intrinsics, R, t):
+    def depth_to_point_cloud(self, depth_image, intrinsics, R, t, is_touch=False):
         """
         Convert a depth image to a point cloud using camera intrinsics and extrinsics.
 
@@ -136,8 +136,9 @@ class DepthSplatfactoModel(SplatfactoModel):
         np.array: Point cloud (N x 3)
         """
         # convert depth image to np
-        depth_image = depth_image.cpu().numpy()
-        depth_image = np.squeeze(depth_image)
+        if isinstance(depth_image, torch.Tensor):
+            depth_image = depth_image.cpu().numpy()
+            depth_image = np.squeeze(depth_image)
         height, width = depth_image.shape
         
         # resize depth image to double
@@ -159,7 +160,7 @@ class DepthSplatfactoModel(SplatfactoModel):
                 points.append([X, Y, Z])
         
         t = np.array([[t[0]], [t[1]], [t[2]]])  # translation vector
-        R = R @ np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])  # Example rotation matrix
+        R = R @ np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])  # Example rotation matrix to get the correct orientation
 
         point_cloud = np.dot(R, np.transpose(points)) + t
         point_cloud = np.transpose(point_cloud)
@@ -167,7 +168,10 @@ class DepthSplatfactoModel(SplatfactoModel):
         
         # only take a subset of the points (0.1 percent randomly)
         num_points = point_cloud_tensor.shape[0]
-        num_points_to_take = int(0.01 * num_points)
+        if is_touch:
+            num_points_to_take = int(0.1 * num_points)
+        else:
+            num_points_to_take = int(0.01 * num_points)
         indices = torch.randperm(num_points)[:num_points_to_take]
         point_cloud_tensor = point_cloud_tensor[indices]
             
@@ -184,8 +188,11 @@ class DepthSplatfactoModel(SplatfactoModel):
         
         features_dc = torch.nn.Parameter(torch.rand(num_points, 3))
         features_rest = torch.nn.Parameter(torch.zeros((num_points, dim_sh - 1, 3)))
-
-        opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(num_points, 1)))
+        if is_touch:
+            # opacties for touch points should be higher
+            opacities = torch.nn.Parameter(0.9 * torch.ones(num_points, 1))
+        else:
+            opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(num_points, 1)))
         
         means = means.to(self.device)
         scales = scales.to(self.device)
@@ -278,6 +285,24 @@ class DepthSplatfactoModel(SplatfactoModel):
                 raise NotImplementedError(f"Unknown depth loss type {self.config.depth_loss_type}")
         return metrics_dict
 
+
+    def add_touch_gaussians(self, touch_pose, camera_info, depth_image):
+        if self.training:
+            extrinsics = touch_pose
+            fx = camera_info["fx"]
+            fy = camera_info["fy"]
+            cx = camera_info["cx"]
+            cy = camera_info["cy"]
+            intrinsics = np.array([[fx, 0, cx],
+                                    [0, fy, cy],
+                                    [0,  0,  1]])
+            
+            R = extrinsics[:3, :3]
+            t = extrinsics[:3, 3]
+            
+            self.depth_to_point_cloud(depth_image, intrinsics, R, t, is_touch=True)
+            
+    
     def lift_depths_to_3d(self, camera: Cameras, batch, force=False):
         if self.training:
             if self.config.lift_depths_to_3d:
@@ -306,13 +331,6 @@ class DepthSplatfactoModel(SplatfactoModel):
                     extrinsics = extrinsics.cpu().numpy()
                     extrinsics = extrinsics.squeeze()
                     extrinsics = np.vstack((extrinsics, np.array([0, 0, 0, 1])))
-                    
-                    # invert transformation matrix
-                    R = extrinsics[:3, :3]
-                    t = extrinsics[:3, 3]
-                    # extrinsics[:3, :3] = R.T
-                    # extrinsics[:3, 3] = -R.T @ t
-                    
                     R = extrinsics[:3, :3]
                     t = extrinsics[:3, 3]
                     

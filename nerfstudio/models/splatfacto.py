@@ -313,7 +313,7 @@ class SplatfactoModelConfig(ModelConfig):
     """whether or not to render uncertainty during GS training. NOTE: This will slow down training significantly."""
     depth_uncertainty_weight: float = 1.0
     """weight of depth uncertainty with the Hessian"""
-    rgb_uncertainty_weight: float = 1.0
+    rgb_uncertainty_weight: float = 0.0
     """weight of rgb uncertainty with the Hessian"""
     max_gauss_ratio: float = 2.5
     """threshold of ratio of gaussian max to min scale before applying regularization
@@ -1167,8 +1167,8 @@ class SplatfactoModel(Model):
             normals_im = normals_im / normals_im.norm(dim=-1, keepdim=True)
             normals_im = (normals_im + 1) / 2
             
-        
         if self.config.render_uncertainty:
+            # render uncertainty as in FisherRF (ECCV 2024, Jiang et al.)
             uncertainties = self.render_uncertainty_rgb_depth([camera], [camera], rgb_weight=rgb_weight, depth_weight=depth_weight)
             uncertainty = uncertainties[0].unsqueeze(2)
             
@@ -1587,6 +1587,10 @@ class SplatfactoModel(Model):
             features_rest_crop = self.features_rest
             scales_crop = self.scales
             quats_crop = self.quats
+            
+            # sam mask
+            if self.config.learn_object_mask:
+                sam_masks_crop = self.sam_mask
 
         colors_crop = torch.cat((features_dc_crop[:, None, :], features_rest_crop), dim=1)
         BLOCK_WIDTH = 16  # this controls the tile size of rasterization, 16 is a good default
@@ -1665,6 +1669,7 @@ class SplatfactoModel(Model):
             pass
 
         with torch.enable_grad():
+            import pdb; pdb.set_trace()
             rendered_image, rendered_depth, radii = rasterizer(
                 means3D=means3D,
                 means2D=screenspace_points,
@@ -1685,6 +1690,9 @@ class SplatfactoModel(Model):
             p.grad = None
             
         rgb = rearrange(rendered_image, "c h w -> h w c")
+        
+        # save rgb
+        # import pdb; pdb.set_trace()
 
         return {"rgb": rgb, "H": cur_H, "depth": rendered_depth}  # type: ignore
 

@@ -659,7 +659,7 @@ method_configs["depth-splatfacto"] = TrainerConfig(
     steps_per_eval_batch=0,
     steps_per_save=2000,
     steps_per_eval_all_images=1000,
-    max_num_iterations=15000,
+    max_num_iterations=21000,
     mixed_precision=False,
     pipeline=VanillaPipelineConfig(
         datamanager=FullImageDatamanagerConfig(
@@ -674,7 +674,7 @@ method_configs["depth-splatfacto"] = TrainerConfig(
             "optimizer": AdamOptimizerConfig(lr=1.6e-4, eps=1e-15),
             "scheduler": ExponentialDecaySchedulerConfig(
                 lr_final=1.6e-6,
-                max_steps=15000,
+                max_steps=21000,
             ),
         },
         "features_dc": {
