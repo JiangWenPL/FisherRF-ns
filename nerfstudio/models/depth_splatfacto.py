@@ -219,7 +219,10 @@ class DepthSplatfactoModel(SplatfactoModel):
             }
         
         if self.config.learn_object_mask:
-            sam_mask = torch.nn.Parameter(-10 * torch.ones(num_points, 1))
+            if is_touch:
+                sam_mask = torch.nn.Parameter(10 * torch.ones(num_points, 1))
+            else:
+                sam_mask = torch.nn.Parameter(-10 * torch.ones(num_points, 1))
             sam_mask = sam_mask.to(self.device)
             params["sam_mask"] = sam_mask
         

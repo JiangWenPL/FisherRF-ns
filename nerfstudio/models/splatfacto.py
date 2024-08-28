@@ -1177,148 +1177,6 @@ class SplatfactoModel(Model):
         else:
             return {"rgb": rgb, "depth": depth_im, "accumulation": alpha, "background": background, "mask": mask, "normal": normals_im}  # type: ignore
     
-    def compute_gradient(self, camera_: Cameras, is_rgb=True):
-        """_summary_
-
-        Args:
-            camera (Cameras): _description_
-        """
-        if not isinstance(camera_, Cameras):
-            print("Called get_outputs with not a camera")
-            return {}
-        assert camera_.shape[0] == 1, "Only one camera at a time"
-        
-        if self.training:
-            optimized_camera_to_world = self.camera_optimizer.apply_to_camera(camera_)
-        else :
-            optimized_camera_to_world = camera_.camera_to_worlds
-        
-        background = self.get_background()
-        crop_ids = None
-        
-        camera = copy.deepcopy(camera_)
-        
-        camera_downscale = self._get_downscale_factor()
-        camera.rescale_output_resolution(1 / camera_downscale)
-        
-        # shift the camera to center of scene looking at center
-        R = optimized_camera_to_world[0, :3, :3]  # 3 x 3
-        T = optimized_camera_to_world[0, :3, 3:4]  # 3 x 1
-        # flip the z and y axes to align with gsplat conventions
-        R_edit = torch.diag(torch.tensor([1, -1, -1], device=self.device, dtype=R.dtype))
-        R = R @ R_edit
-        # analytic matrix inverse to get world2camera matrix
-        R_inv = R.T
-        T_inv = -R_inv @ T
-        viewmat = torch.eye(4, device=R.device, dtype=R.dtype)
-        viewmat[:3, :3] = R_inv
-        viewmat[:3, 3:4] = T_inv
-        # calculate the FOV of the camera given fx and fy, width and height
-        cx = camera.cx.item()
-        cy = camera.cy.item()
-        W, H = int(camera.width.item()), int(camera.height.item())
-        
-        # get copies of parameters
-        opacities = torch.sigmoid(self.opacities).clone().detach().requires_grad_(True)
-        means = self.means.clone().detach().requires_grad_(True)
-        scales = torch.exp(self.scales).clone().detach().requires_grad_(True)
-        quats = self.quats.clone().detach().requires_grad_(True)
-
-        
-        # retain grad on features_dc[:, None, :]
-        featured_dc_sliced = self.features_dc[:, None, :].clone().detach().requires_grad_(True)
-        features_rest = self.features_rest.clone().detach().requires_grad_(True)
-        
-        
-        colors = torch.cat((featured_dc_sliced, features_rest), dim=1)
-        colors.retain_grad()
-        
-        rotations = quats / quats.norm(dim=-1, keepdim=True)
-        rotations.retain_grad()
-        
-        BLOCK_WIDTH = 16  # this controls the tile size of rasterization, 16 is a good default
-        xys_temp, depths, radii_temp, conics, comp, num_tiles_hit, cov3d = project_gaussians(  # type: ignore
-            means,
-            scales,
-            1,
-            rotations,
-            viewmat.squeeze()[:3, :],
-            camera.fx.item(),
-            camera.fy.item(),
-            cx,
-            cy,
-            H,
-            W,
-            BLOCK_WIDTH,
-        )  # type: ignore
-
-        # rescale the camera back to original dimensions before returning
-        camera.rescale_output_resolution(camera_downscale)
-        
-        xys_temp.retain_grad()
-        
-        if self.config.sh_degree > 0:
-            viewdirs = means.detach() - optimized_camera_to_world.detach()[..., :3, 3]  # (N, 3)
-            viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
-            n = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
-            rgbs = spherical_harmonics(n, viewdirs, colors)
-            rgbs = torch.clamp(rgbs + 0.5, min=0.0)  # type: ignore
-        else:
-            rgbs = torch.sigmoid(colors[:, 0, :])
-
-        assert (num_tiles_hit > 0).any()  # type: ignore
-
-        # apply the compensation of screen space blurring to gaussians
-        
-        rgb, alpha = rasterize_gaussians(  # type: ignore
-            xys_temp,
-            depths,
-            radii_temp,
-            conics,
-            num_tiles_hit,  # type: ignore
-            rgbs,
-            opacities,
-            H,
-            W,
-            BLOCK_WIDTH,
-            background=background,
-            return_alpha=True,
-        )  # type: ignore
-        
-        alpha = alpha[..., None]
-        rgb = torch.clamp(rgb, max=1.0)  # type: ignore
-        # depth_im = None
-        # if self.config.output_depth_during_training or not self.training:
-        #     depth_im = rasterize_gaussians(  # type: ignore
-        #         xys_temp,
-        #         depths,
-        #         radii_temp,
-        #         conics,
-        #         num_tiles_hit,  # type: ignore
-        #         depths[:, None].repeat(1, 3),
-        #         opacities_new,
-        #         H,
-        #         W,
-        #         BLOCK_WIDTH,
-        #         background=torch.zeros(3, device=self.device),
-        #     )[..., 0:1]  # type: ignore
-        #     depth_im = torch.where(alpha > 0, depth_im / alpha, depth_im.detach().max())
-        
-        means3D = means
-        shs = colors
-        
-        params = [means3D, shs, opacities, scales, rotations]
-        
-        rgb.backward(gradient=torch.ones_like(rgb))
-        
-        cur_H = [p.grad.detach().clone() for p in params] #type: ignore
-        for p in params:
-            p.grad = None
-            
-        rgb = rearrange(rgb, "c h w -> h w c")
-        
-        return {"rgb": rgb, "H": cur_H }  # type: ignore
-        
     def get_gt_img(self, image: torch.Tensor):
         """Compute groundtruth image with iteration dependent downscale factor for evaluation purpose
 
@@ -1641,14 +1499,15 @@ class SplatfactoModel(Model):
         scales = torch.exp(scales_crop.clone()).requires_grad_(True)
         rotations = quats_crop / quats_crop.norm(dim=-1, keepdim=True)
         rotations.requires_grad_(True)
+        sam_masks = sam_masks_crop.clone().requires_grad_(True) if self.config.learn_object_mask else None
 
-        params = [means3D, shs, opacities, scales, rotations]
+        params = [means3D, shs, opacities, scales, rotations, sam_masks]
 
         return rasterizer, params
 
 
     @torch.no_grad()
-    def compute_diag_H_rgb_depth(self, camera: Cameras, compute_rgb_H=False):
+    def compute_diag_H_rgb_depth(self, camera: Cameras, compute_rgb_H=False, is_touch=False):
         """
         Compute diagonal hessian, on rgb or depth.
 
@@ -1659,7 +1518,7 @@ class SplatfactoModel(Model):
             means3D, shs, opacities, scales, rotations
         """
         rasterizer, params = self.prepare_rasterizer(camera)
-        means3D, shs, opacities, scales, rotations = params
+        means3D, shs, opacities, scales, rotations, sam_masks = params
 
         # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
         screenspace_points = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda") + 0
@@ -1669,7 +1528,6 @@ class SplatfactoModel(Model):
             pass
 
         with torch.enable_grad():
-            import pdb; pdb.set_trace()
             rendered_image, rendered_depth, radii = rasterizer(
                 means3D=means3D,
                 means2D=screenspace_points,
@@ -1683,17 +1541,24 @@ class SplatfactoModel(Model):
                 rendered_image.backward(gradient=torch.ones_like(rendered_image))
             else:
                 rendered_depth.backward(gradient=torch.ones_like(rendered_depth))
+        # don't get grad of sam_masks, but use it to filter out
+        cur_H = [p.grad.detach().clone() for p in params[:-1]] #type: ignore
+        if is_touch:
+            import pdb; pdb.set_trace()
+            # only take grad of SAM2 masked object.
+            sam_masks_prob = torch.sigmoid(sam_masks)
+            sam_masks_prob = torch.where(sam_masks_prob > 0.5, torch.ones_like(sam_masks_prob), torch.zeros_like(sam_masks_prob))
+            mask = sam_masks_prob.squeeze(-1) == 0
             
-        cur_H = [p.grad.detach().clone() for p in params] #type: ignore
-            
+            for i in range(len(cur_H)):
+                # set the grad to 0 if not part of the object
+                cur_H[i][mask] = 0.
+        
         for p in params:
             p.grad = None
             
         rgb = rearrange(rendered_image, "c h w -> h w c")
         
-        # save rgb
-        # import pdb; pdb.set_trace()
-
         return {"rgb": rgb, "H": cur_H, "depth": rendered_depth}  # type: ignore
 
 
@@ -1741,7 +1606,7 @@ class SplatfactoModel(Model):
         uncern_maps = []
         for test_cam in test_cameras:
             rasterizer, params = self.prepare_rasterizer(test_cam)
-            means3D, shs, opacities, scales, rotations = params
+            means3D, shs, opacities, scales, rotations, sam_masks = params
 
             # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
             screenspace_points = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda") + 0

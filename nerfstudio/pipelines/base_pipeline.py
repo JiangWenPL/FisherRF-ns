@@ -380,7 +380,10 @@ class VanillaPipeline(Pipeline):
             view_pos[:3, 3] *= scale_factor
             cam.camera_to_worlds = view_pos[:3, :4].unsqueeze(0)
             
-            cur_H: torch.tensor = self.compute_hessian(cam, rgb_weight, depth_weight) # type: ignore
+            # if camera_info is not None, it is a touch view
+            is_touch = camera_info is not None
+            
+            cur_H: torch.tensor = self.compute_hessian(cam, rgb_weight, depth_weight, is_touch=is_touch) # type: ignore
             I_acq = cur_H
             acq_scores[idx] = torch.sum(I_acq * I_train).item()
 
@@ -558,10 +561,14 @@ class VanillaPipeline(Pipeline):
                     
                 frames = data['frames']
                 poses = []
+                diff = 0.25  # 25 cm away from the touch in the negative z direction
                 for frame in frames:
                     pose = frame['transformation']
-                    # convert to numpy
                     pose_np = np.array(pose).reshape(4, 4)
+                    # add poses along the z in the negative direction
+                    z = pose_np[0:3, 2]
+                    # update the position in pose_np
+                    pose_np[0:3, 3] -= (diff * z)
                     pose_np[0:3, 1:3] *= -1
                     poses.append(pose_np)
                     
@@ -624,14 +631,14 @@ class VanillaPipeline(Pipeline):
         return model_outputs, loss_dict, metrics_dict
     
     
-    def compute_hessian(self, ray_bundle, rgb_weight, depth_weight):
+    def compute_hessian(self, ray_bundle, rgb_weight, depth_weight, is_touch=False):
         if hasattr(self.model, 'compute_diag_H_rgb_depth') and callable(getattr(self.model, 'compute_diag_H_rgb_depth')):
             # compute the Hessian
-            H_info_rgb = self.model.compute_diag_H_rgb_depth(ray_bundle, compute_rgb_H=True) # type: ignore
+            H_info_rgb = self.model.compute_diag_H_rgb_depth(ray_bundle, compute_rgb_H=True, is_touch=is_touch) # type: ignore
             H_info_rgb['H'] = [p * rgb_weight for p in H_info_rgb['H']]
             H_per_gaussian = sum([reduce(p, "n ... -> n", "sum") for p in H_info_rgb['H']])
             
-            H_info_depth = self.model.compute_diag_H_rgb_depth(ray_bundle, compute_rgb_H=False) # type: ignore
+            H_info_depth = self.model.compute_diag_H_rgb_depth(ray_bundle, compute_rgb_H=False, is_touch=is_touch) # type: ignore
             H_info_depth['H'] = [p * depth_weight for p in H_info_depth['H']]
             H_per_gaussian += sum([reduce(p, "n ... -> n", "sum") for p in H_info_depth['H']])
             return H_per_gaussian   
