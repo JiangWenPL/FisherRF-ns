@@ -374,6 +374,7 @@ class VanillaPipeline(Pipeline):
                 cam.cy[0][0] = camera_info['cy']
                 cam.width[0][0] = camera_info['w']
                 cam.height[0][0] = camera_info['h']
+                
             cam.metadata = None
             
             view_pos = torch.from_numpy(view_pos.astype(np.float32)).to(self.device)
@@ -526,10 +527,8 @@ class VanillaPipeline(Pipeline):
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
-        if step % 3000 == 2999:
-            
-            # if self.added_views_so_far < self.views_to_add:
-            if False:
+        if step % 2000 == 1999:
+            if self.added_views_so_far < self.views_to_add:
                 # add views to the training set if we can
                 next_view, acq_scores = self.run_nbv(rgb_weight=0.0, depth_weight=1.0, is_touch=False)
                 
