@@ -298,7 +298,6 @@ class Trainer:
         # save checkpoint at the end of training
         self.save_checkpoint(step)
         # send a service call in ROS that we are done.
-        # import pdb; pdb.set_trace()
         # rospy.wait_for_service('finish_training')
         # rospy.loginfo("Calling service to complete training")
         # finish_training_client = rospy.ServiceProxy("/finish_training", Trigger)
@@ -486,6 +485,9 @@ class Trainer:
 
         with torch.autocast(device_type=cpu_or_cuda_str, enabled=self.mixed_precision):
             _, loss_dict, metrics_dict = self.pipeline.get_train_loss_dict(step=step)
+            # remove the gaussians from cull mask
+            self.pipeline.model.update_optimizer_with_cull_mask(self.optimizers) # type: ignore
+            
             loss = functools.reduce(torch.add, loss_dict.values())
         self.grad_scaler.scale(loss).backward()  # type: ignore
         needs_step = [
