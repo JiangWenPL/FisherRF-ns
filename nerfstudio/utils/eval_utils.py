@@ -91,8 +91,13 @@ def eval_setup(
     config = yaml.load(config_path.read_text(), Loader=yaml.Loader)
     
     # # hack; fix this later
-    test_on_other_dataset_str = '/home/user/NextBestSense/data/2024-08-15-03-23-17'
-    test_on_other_dataset_str = None
+    # test_on_other_dataset_str = '/home/user/NextBestSense/data/2024-09-06-08-36-18' # bunny rig test dataset
+    # test_on_other_dataset_str = '/home/user/NextBestSense/data/2024-09-06-20-32-44' # car rig test dataset
+    # test_on_other_dataset_str = '/home/user/NextBestSense/data/2024-09-07-19-02-38' # prism rig test dataset
+    # test_on_other_dataset_str = '/home/user/NextBestSense/data/bunny_test'
+    
+    print(test_on_other_dataset_str)
+    # test_on_other_dataset_str = None
     if test_on_other_dataset_str is not None:
         # change config such that the path is eval and we only test on the other dataset
         dataset_path = Path(test_on_other_dataset_str)

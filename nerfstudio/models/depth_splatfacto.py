@@ -62,6 +62,7 @@ from modified_diff_gaussian_rasterization_depth import GaussianRasterizationSett
 
 from nerfstudio.models.splatfacto import SplatfactoModel, SplatfactoModelConfig, random_quat_tensor
 
+# you can use it rn
 
 @dataclass
 class DepthSplatfactoModelConfig(SplatfactoModelConfig):
@@ -74,7 +75,7 @@ class DepthSplatfactoModelConfig(SplatfactoModelConfig):
     """Whether input depth maps are Euclidean distances (or z-distances)."""
     use_depth_smooth_loss: bool = True
     """Whether to enable depth smooth loss or not"""
-    smooth_loss_lambda: float = 10
+    smooth_loss_lambda: float = 2
     """Regularizer for smooth loss"""
     depth_sigma: float = 0.01
     """Uncertainty around depth values in meters (defaults to 1cm)."""
@@ -110,9 +111,108 @@ class DepthSplatfactoModel(SplatfactoModel):
         
         self.lifted_depths = np.zeros(100)
         self.new_gauss_params = None
+        self.cull_mask = None
+        
+        # set touch dataset
+        self.touch_dataset = []
+        
+        import pdb; pdb.set_trace()
         
         super().__init__(*args, **kwargs)
         
+        
+    def cull_gaussians_by_mask(self, cull_mask: torch.Tensor):
+        """
+        This function deletes gaussians with under a certain opacity threshold
+        cull_mask: a mask indicates extra gaussians to cull besides existing culling criterion
+        """
+        n_bef = self.num_points
+        for name, param in self.gauss_params.items():
+            self.gauss_params[name] = torch.nn.Parameter(param[~cull_mask])
+        CONSOLE.log(
+            f"Culled {n_bef - self.num_points} gaussians "
+        )
+        return cull_mask
+    
+    def points_in_cylinder(self, pt1, pt2, r, q):
+        vec = pt2 - pt1
+        const = r * np.linalg.norm(vec)
+        return np.where(np.dot(q - pt1, vec) >= 0 and np.dot(q - pt2, vec) <= 0 and np.linalg.norm(np.cross(q - pt1, vec)) <= const)
+    
+    def points_in_sphere(self, center, r, q):
+        return np.where(np.linalg.norm(q - center) <= r)
+        
+    def is_point_in_bounding_box(self, points, min_bound, max_bound):
+        """
+        Check if points are inside a bounding box.
+
+        Args:
+        - points: Tensor of shape (n, 3) containing points to check.
+        - min_bound: Tensor of shape (3,) representing minimum coordinates of the bounding box.
+        - max_bound: Tensor of shape (3,) representing maximum coordinates of the bounding box.
+
+        Returns:
+        - Boolean tensor: Tensor of shape (n,) with True if point is inside the bounding box, False otherwise.
+        """
+        return (points >= min_bound).all(dim=1) & (points <= max_bound).all(dim=1)
+
+    def prune_gaussians(self, top_point, bottom_point, radius):
+        # convert means to np
+        means = self.means.detach().cpu().numpy()
+        mask = self.are_points_in_cylinder(top_point, bottom_point, radius, means)
+        self.cull_mask = self.cull_gaussians_by_mask(mask)
+        
+    def update_optimizer_with_cull_mask(self, optimizers: Optimizers):
+        """
+        Update the optimizer with the cull mask.
+        """
+        if self.cull_mask is not None:
+            import pdb; pdb.set_trace()
+            self.remove_from_all_optim(optimizers, self.cull_mask)
+            self.cull_mask = None
+    
+    def squash_gaussians(self, gaussians, num_points):
+        pass
+    
+    def are_points_in_cylinder(self, top_center, bottom_center, radius, points):
+        """
+        Check if multiple points are inside a cylinder defined by its top and bottom centers and a radius.
+
+        :param top_center: A list or tuple representing the coordinates of the top center of the cylinder (e.g., [x1, y1, z1]).
+        :param bottom_center: A list or tuple representing the coordinates of the bottom center of the cylinder (e.g., [x2, y2, z2]).
+        :param radius: The radius of the cylinder.
+        :param points: A NumPy array of shape (n, 3) where each row represents a point's coordinates (e.g., [[x1, y1, z1], [x2, y2, z2], ...]).
+        :return: A NumPy array of booleans, where each boolean indicates if the corresponding point is inside the cylinder.
+        """
+        top_center = np.array(top_center)
+        bottom_center = np.array(bottom_center)
+        points = np.array(points)
+        
+        # Vector along the axis of the cylinder
+        axis_vector = top_center - bottom_center
+        axis_length = np.linalg.norm(axis_vector)
+        axis_unit_vector = axis_vector / axis_length
+        
+        # Vectors from bottom center to each point
+        vectors_to_points = points - bottom_center
+        
+        # Projection lengths of each vector_to_point onto the axis_unit_vector
+        projection_lengths = np.dot(vectors_to_points, axis_unit_vector)
+        
+        # Check if the projection lengths are within the cylinder height
+        within_height = (projection_lengths >= 0) & (projection_lengths <= axis_length)
+        
+        # Closest points on the cylinder axis to each point
+        closest_points = bottom_center + np.outer(projection_lengths, axis_unit_vector)
+        
+        # Distances from each point to the closest point on the axis
+        distances_to_axis = np.linalg.norm(points - closest_points, axis=1)
+        
+        # Check if the distances are within the radius
+        within_radius = distances_to_axis <= radius
+        
+        # Return a boolean array indicating which points are inside the cylinder
+        return within_height & within_radius
 
     def _get_sigma(self):
         if not self.config.should_decay_sigma:
@@ -169,9 +269,9 @@ class DepthSplatfactoModel(SplatfactoModel):
         # only take a subset of the points (0.1 percent randomly)
         num_points = point_cloud_tensor.shape[0]
         if is_touch:
-            num_points_to_take = int(0.1 * num_points)
+            num_points_to_take = int(1 * num_points)
         else:
-            num_points_to_take = int(0.01 * num_points)
+            num_points_to_take = int(0.001 * num_points)
         indices = torch.randperm(num_points)[:num_points_to_take]
         point_cloud_tensor = point_cloud_tensor[indices]
             
@@ -189,8 +289,8 @@ class DepthSplatfactoModel(SplatfactoModel):
         features_dc = torch.nn.Parameter(torch.rand(num_points, 3))
         features_rest = torch.nn.Parameter(torch.zeros((num_points, dim_sh - 1, 3)))
         if is_touch:
-            # opacties for touch points should be higher
-            opacities = torch.nn.Parameter(0.9 * torch.ones(num_points, 1))
+            # opacities for touch points should be higher
+            opacities = torch.nn.Parameter(20 * torch.ones(num_points, 1))
         else:
             opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(num_points, 1)))
         
@@ -220,12 +320,12 @@ class DepthSplatfactoModel(SplatfactoModel):
         
         if self.config.learn_object_mask:
             if is_touch:
-                sam_mask = torch.nn.Parameter(10 * torch.ones(num_points, 1))
+                sam_mask = torch.nn.Parameter(100 * torch.ones(num_points, 1))
             else:
                 sam_mask = torch.nn.Parameter(-10 * torch.ones(num_points, 1))
             sam_mask = sam_mask.to(self.device)
             params["sam_mask"] = sam_mask
-        
+            
         self.new_gauss_params = torch.nn.ParameterDict(params)
     
     def populate_modules(self):
@@ -242,6 +342,19 @@ class DepthSplatfactoModel(SplatfactoModel):
             
     def get_metrics_dict(self, outputs, batch):
         metrics_dict = super().get_metrics_dict(outputs, batch)
+        
+        # sample a random touch camera
+        if False:
+            touch_info = self.touch_dataset[np.random.randint(0, len(self.touch_dataset))]
+            touch_cam = touch_info[0]
+            termination_depth = touch_info[1]
+            outputs = self.get_outputs(touch_cam)
+            touch_depth = outputs["depth"]
+            termination_depth = termination_depth.to(self.device)
+            # reguarlize depth from touch very strictly.
+            metrics_dict["touch_depth_loss"] = basic_depth_loss(
+                termination_depth, touch_depth, None)
+            
         if self.training:
             if (
                 losses.FORCE_PSEUDODEPTH_LOSS
@@ -250,7 +363,7 @@ class DepthSplatfactoModel(SplatfactoModel):
                 raise ValueError(
                     f"Forcing pseudodepth loss, but depth loss type ({self.config.depth_loss_type}) must be one of {losses.PSEUDODEPTH_COMPATIBLE_LOSSES}"
                 )
-            mask = None
+                
             if "mask" in batch:
                 # batch["mask"] : [H, W, 1]
                 mask = self._downscale_if_required(batch["mask"])
@@ -268,7 +381,7 @@ class DepthSplatfactoModel(SplatfactoModel):
                 
             elif self.config.depth_loss_type in (DepthLossType.PEARSON_LOSS,):
                 metrics_dict["depth_loss"] = torch.Tensor([0.0]).to(self.device)
-                termination_depth = batch["depth_image"].to(self.device)
+                termination_depth = batch["mde_depth_image"].to(self.device)
                 metrics_dict["depth_loss"] = pearson_correlation_depth_loss(
                     termination_depth, outputs["depth"], mask)
                 
@@ -288,6 +401,14 @@ class DepthSplatfactoModel(SplatfactoModel):
                 raise NotImplementedError(f"Unknown depth loss type {self.config.depth_loss_type}")
         return metrics_dict
 
+    def modify_gaussians_from_touch_pose(self, touch_pose, camera_info, depth_image):
+        pass
+    
+    def add_touch_cam(self, dt_cam, depth):
+        """
+        add touch camera to the touch dataset
+        """
+        self.touch_dataset.append((dt_cam, depth))
 
     def add_touch_gaussians(self, touch_pose, camera_info, depth_image):
         if self.training:

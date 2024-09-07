@@ -407,6 +407,26 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
         self.train_all_cameras = [i for i in range(len(self.train_dataset))]
         self.original_subset = deepcopy(self.train_unseen_cameras)
+    
+    
+    def add_new_touch(self) -> None:
+        """ Adds a new view to the training set. Simply relooks at the transforms.json and adds the new view"""
+        print("New touch added")
+        import time; time.sleep(2)
+        
+        kwargs = {"add_view": True}
+        self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train", **kwargs)
+        
+        self.train_dataset = self.create_train_dataset()
+        self.eval_dataset = self.create_eval_dataset()
+        self.cached_train, self.cached_eval = self.cache_images(self.config.cache_images)
+        
+        print("Length of new train dataset: ", len(self.train_dataset))
+        print("Length of new eval dataset: ", len(self.eval_dataset))
+        
+        self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
+        self.train_all_cameras = [i for i in range(len(self.train_dataset))]
+        self.original_subset = deepcopy(self.train_unseen_cameras)
         
         
     def next_eval(self, step: int) -> Tuple[Cameras, Dict]:

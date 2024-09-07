@@ -121,12 +121,24 @@ class DepthDataset(InputDataset):
             filepath=filepath, height=height, width=width, scale_factor=scale_factor
         )
         
+        
+        
         if self.normals_filenames is not None:
             filepath = self.normals_filenames[data["image_idx"]]
             normals_image = get_normal_image_from_path(filepath, height, width)
             return {"depth_image": depth_image, "normals_image": normals_image}
+        
+        # mde depth is the file path with a mde prefix
+        name = filepath.name
+        # insert mde after the number but before the depth.png
+        mde_name  = name[:name.find("depth")] + "mde_" + name[name.find("depth"):]
+        
+        mde_filepath = filepath.parent / (mde_name)
+        mde_depth_image = get_depth_image_from_path(
+            filepath=mde_filepath, height=height, width=width, scale_factor=1.0
+        )
 
-        return {"depth_image": depth_image}
+        return {"depth_image": depth_image,  "mde_depth_image": mde_depth_image}
 
     def _find_transform(self, image_path: Path) -> Union[Path, None]:
         while image_path.parent != image_path:

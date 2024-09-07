@@ -286,8 +286,11 @@ class VanillaPipeline(Pipeline):
 
         # get views to add 
         self.views_to_add = int(rospy.get_param('views_to_add', 10)) # type: ignore
+        
+        self.touches_to_add = int(rospy.get_param('touches_to_add', 10)) # type: ignore
  
         self.added_views_so_far = 0
+        self.added_touches_so_far = 0
         
         self.new_view_ready = False
         # create service to receive 
@@ -374,6 +377,8 @@ class VanillaPipeline(Pipeline):
                 cam.cy[0][0] = camera_info['cy']
                 cam.width[0][0] = camera_info['w']
                 cam.height[0][0] = camera_info['h']
+                
+                self.dt_cam = cam
                 
             cam.metadata = None
             
@@ -528,6 +533,7 @@ class VanillaPipeline(Pipeline):
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
         
         if step % 2000 == 1999:
+            # if False:
             if self.added_views_so_far < self.views_to_add:
                 # add views to the training set if we can
                 next_view, acq_scores = self.run_nbv(rgb_weight=0.0, depth_weight=1.0, is_touch=False)
@@ -535,7 +541,7 @@ class VanillaPipeline(Pipeline):
                 # send acquired scores in ROS
                 success = self.send_nbv_scores(acq_scores)
                 
-                rate = rospy.Rate(1)  # 1 Hz
+                rate = rospy.Rate(1)  # 1 Hz    
                 while not rospy.is_shutdown() and not self.new_view_ready:
                     rospy.loginfo("Waiting for Robot Node to Be Done...")
                     rate.sleep()
@@ -549,84 +555,116 @@ class VanillaPipeline(Pipeline):
                     self.added_views_so_far += 1
 
             else:
-                # add new touch!! 
-                rospy.loginfo("Adding new touch view!")
-                
-                # for now, get from the list of touches
-                touch_data_dir = "/home/user/NextBestSense/data/touch_data/touch"
-                
-                with open(f'{touch_data_dir}/transforms.json', "r") as f:
-                    data = json.load(f)
+                if self.added_touches_so_far < self.touches_to_add:
+                    # add new touch!! 
+                    rospy.loginfo("Adding new touch view!")
                     
-                frames = data['frames']
-                poses = []
-                diff = 0.25  # 25 cm away from the touch in the negative z direction
-                for frame in frames:
-                    pose = frame['transformation']
-                    pose_np = np.array(pose).reshape(4, 4)
-                    # add poses along the z in the negative direction
-                    z = pose_np[0:3, 2]
-                    # update the position in pose_np
-                    pose_np[0:3, 3] -= (diff * z)
-                    pose_np[0:3, 1:3] *= -1
-                    poses.append(pose_np)
+                    # for now, get from the list of touches
+                    touch_data_dir = "/home/user/NextBestSense/data/touch_data/touch"
                     
+                    with open(f'{touch_data_dir}/transforms.json', "r") as f:
+                        data = json.load(f)
+                        
+                    import pdb; pdb.set_trace()
+                        
+                    frames = data['frames']
+                    poses = []
+                    diff = 0.25  # 25 cm away from the touch in the negative z direction
+                    orig_touch_poses = []
+                    for frame in frames:
+                        pose = frame['transformation']
+                        pose_np = np.array(pose).reshape(4, 4)
+                        # add poses along the z in the negative direction
+                        z = pose_np[0:3, 2]
+                        
+                        orig_pose = pose_np.copy()
+                        orig_pose[0:3, 1:3] *= -1
+                        orig_touch_poses.append(orig_pose)
+                        
+                        # update the position in pose_np
+                        pose_np[0:3, 3] -= (diff * z)
+                        pose_np[0:3, 1:3] *= -1
+                        poses.append(pose_np)
+                        
+                    camera_info = {}
+                    cam_angle_x = float(data['camera_angle_x'])
                     
-                camera_info = {}
-                cam_angle_x = float(data['camera_angle_x'])
-                
-                focal_length = 0.5 * data['w'] / np.tan(0.5 * cam_angle_x)
-                
-                camera_info['fx'] = focal_length
-                camera_info['fy'] = focal_length
-                camera_info['cx'] = data['w'] / 2
-                camera_info['cy'] = data['h'] / 2
-                camera_info['h'] = data['h']
-                camera_info['w'] = data['w']
+                    focal_length = 0.5 * data['w'] / np.tan(0.5 * cam_angle_x)
                     
-                next_touch, acq_scores = self.run_nbv(rgb_weight=0.0, depth_weight=1.0, is_touch=True, 
-                                                      touch_poses=poses, camera_info=camera_info)
-                
-                
-                import pdb; pdb.set_trace()
-                # get depth
-                filepath = frames[next_touch]['file_path']
-                touch_pose = poses[next_touch]
-                # remove 'touch/' from the path
-                filepath = filepath.split('/')[-1]
-                depth = cv2.imread(f"{touch_data_dir}/{filepath}", cv2.IMREAD_UNCHANGED)
-                depth = depth / 1000.0
-                depth = depth / 1000.0
-                
-                # set low values to zero
-                depth[depth < 0.005] = 0.0
-                self.model.add_touch_gaussians(touch_pose, camera_info, depth) # type: ignore
-                
-                # update all depth maps with the touch depth
-                
-                
-                # rate = rospy.Rate(1)  # 1 Hz
-                # while not rospy.is_shutdown() and not self.new_view_ready:
-                #     rospy.loginfo("Waiting for Robot Node to Be Done...")
-                #     rate.sleep()
+                    camera_info['fx'] = focal_length
+                    camera_info['fy'] = focal_length
+                    camera_info['cx'] = data['w'] / 2
+                    camera_info['cy'] = data['h'] / 2
+                    camera_info['h'] = data['h']
+                    camera_info['w'] = data['w']
+                        
+                    # get next best touch
+                    next_touch, acq_scores = self.run_nbv(rgb_weight=0.1, depth_weight=1.0, is_touch=True, 
+                                                        touch_poses=poses, camera_info=camera_info)
                     
-                # rospy.loginfo("GS taking new touch!")
-                
-                # if success:
-                #     # add Gaussians from touch to the scene, and remove the floaters from the scene during pre-touch.
-                #     self.prune_pre_touch_gaussians() # type: ignore
-                #     self.update_depths_with_touch() # type: ignore
-                #     self.add_touch_gaussians() # type: ignore
+                    # rate = rospy.Rate(1)  # 1 Hz
+                    # while not rospy.is_shutdown() and not self.new_view_ready:
+                    #     rospy.loginfo("Waiting for Robot Node to Be Done...")
+                    #     rate.sleep()
+                        
+                    # rospy.loginfo("GS taking new touch!")
                     
-                #     self.datamanager.add_new_view(next_view) # type: ignore
-                #     # add DT 'camera'
-                #     self.model.camera_optimizer.add_camera() # type: ignore
-                #     print("Added new view succesfully.")
-                #     self.new_view_ready = False
-                
-                
-            
-        
+                    # if success:
+                    #     self.prune_pre_touch_gaussians() # type: ignore
+                    #     self.update_depths_with_touch() # type: ignore
+                    #     self.add_touch_gaussians() # type: ignore
+                        
+                    #     self.datamanager.add_new_view(next_view) # type: ignore
+                    #     # add DT 'camera'
+                    #     self.model.camera_optimizer.add_camera() # type: ignore
+                    #     print("Added new view succesfully.")
+                    #     self.new_view_ready = False
+                    
+                    # get depth of the touch
+                    filepath = frames[next_touch]['file_path']
+                    touch_pose = poses[next_touch]
+                    # remove 'touch/' from the path
+                    filepath = filepath.split('/')[-1]
+                    depth = cv2.imread(f"{touch_data_dir}/{filepath}", cv2.IMREAD_UNCHANGED)
+                    depth = depth / 1000.0
+                    depth = depth / 1000.0
+                    
+                    # set low values to zero
+                    depth[depth < 0.005] = 0.0
+                    
+                    # we have computed the best touch, now add it
+                    # real surface is higher than current surface: add the gaussians. no need to squash
+                    # start from the touch pose and slowly move the camera to the actual touch pose
+                    
+                    is_real_surface_lower = True
+                    
+                    # if trajectory is stored, break up trajectory into discrete sections and prune Gaussians
+                    if is_real_surface_lower:
+                        import pdb; pdb.set_trace()
+                        ros_touch_pose = poses[next_touch]
+                        ros_touch_pose[0:3, 1:3] *= -1
+                        z = ros_touch_pose[0:3, 2]
+                        
+                        top_position = ros_touch_pose[0:3, 3]
+                        bottom_position = top_position + (0.25 * z)
+                        
+                        # prune the Gaussians in the cylinder from n meters out to the touch
+                        self.model.prune_gaussians(top_position, bottom_position, 0.03) # type: ignore
+                    
+                    # now add the Gaussians for touch! These Gaussians are less likely to be culled as they are reasonably close to the surface
+                    self.model.add_touch_gaussians(orig_touch_poses[next_touch], camera_info, depth) # type: ignore
+                    self.added_touches_so_far += 1
+                    
+                    # add to touch dataset with dt cam and provided depth
+                    self.model.add_touch_cam(self.dt_cam, depth) # type: ignore
+                    
+                    # the DT camera needs to be treated separately from the regular camera.
+                    self.datamanager.add_new_touch() # type: ignore
+                    
+                    # add a new touch camera to GS
+                    
+                    # update all depth maps with the touch depth
+                    
         return model_outputs, loss_dict, metrics_dict
     
     

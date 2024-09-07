@@ -1091,6 +1091,10 @@ class SplatfactoModel(Model):
         alpha = alpha[..., None]
         rgb = torch.clamp(rgb, max=1.0)  # type: ignore
         depth_im = None
+        # perform depth rendering by 
+        # use radii no grad
+        # radii = self.radii.detach().clone().requires_grad_(False)
+        # conics_depth = conics.detach().clone().requires_grad_(False)
         if self.config.output_depth_during_training or not self.training:
             depth_im = rasterize_gaussians(  # type: ignore
                 self.xys,
@@ -1544,7 +1548,6 @@ class SplatfactoModel(Model):
         # don't get grad of sam_masks, but use it to filter out
         cur_H = [p.grad.detach().clone() for p in params[:-1]] #type: ignore
         if is_touch:
-            import pdb; pdb.set_trace()
             # only take grad of SAM2 masked object.
             sam_masks_prob = torch.sigmoid(sam_masks)
             sam_masks_prob = torch.where(sam_masks_prob > 0.5, torch.ones_like(sam_masks_prob), torch.zeros_like(sam_masks_prob))
