@@ -69,13 +69,13 @@ class DepthSplatfactoModelConfig(SplatfactoModelConfig):
     """Splatfacto Model Config, nerfstudio's implementation of Gaussian Splatting"""
 
     _target: Type = field(default_factory=lambda: DepthSplatfactoModel)
-    depth_loss_mult: float = 0.001
+    depth_loss_mult: float = 0.1
     """Lambda of the depth loss."""
     is_euclidean_depth: bool = False
     """Whether input depth maps are Euclidean distances (or z-distances)."""
-    use_depth_smooth_loss: bool = True
+    use_depth_smooth_loss: bool = False
     """Whether to enable depth smooth loss or not"""
-    smooth_loss_lambda: float = 2
+    smooth_loss_lambda: float = 0.0
     """Regularizer for smooth loss"""
     depth_sigma: float = 0.01
     """Uncertainty around depth values in meters (defaults to 1cm)."""
@@ -112,11 +112,11 @@ class DepthSplatfactoModel(SplatfactoModel):
         self.lifted_depths = np.zeros(100)
         self.new_gauss_params = None
         self.cull_mask = None
-        
+
+        self.counter = 0
+
         # set touch dataset
         self.touch_dataset = []
-        
-        import pdb; pdb.set_trace()
         
         super().__init__(*args, **kwargs)
         
@@ -343,14 +343,13 @@ class DepthSplatfactoModel(SplatfactoModel):
     def get_metrics_dict(self, outputs, batch):
         metrics_dict = super().get_metrics_dict(outputs, batch)
         
-        # sample a random touch camera
-        if False:
+        if len(self.touch_dataset) > 0:
+            # sample a random touch camera
             touch_info = self.touch_dataset[np.random.randint(0, len(self.touch_dataset))]
             touch_cam = touch_info[0]
             termination_depth = touch_info[1]
-            outputs = self.get_outputs(touch_cam)
-            touch_depth = outputs["depth"]
-            termination_depth = termination_depth.to(self.device)
+            touch_outputs = self.get_outputs(touch_cam)
+            touch_depth = touch_outputs["depth"]
             # reguarlize depth from touch very strictly.
             metrics_dict["touch_depth_loss"] = basic_depth_loss(
                 termination_depth, touch_depth, None)
@@ -399,6 +398,7 @@ class DepthSplatfactoModel(SplatfactoModel):
                 )
             else:
                 raise NotImplementedError(f"Unknown depth loss type {self.config.depth_loss_type}")
+        
         return metrics_dict
 
     def modify_gaussians_from_touch_pose(self, touch_pose, camera_info, depth_image):
@@ -476,11 +476,11 @@ class DepthSplatfactoModel(SplatfactoModel):
                 )
             if "depth_loss" in metrics_dict:
                 loss_dict["depth_loss"] = self.config.depth_loss_mult * metrics_dict["depth_loss"]
-        # if self.config.depth_loss_mult >= 0.005:
-        #     self.config.depth_loss_mult = max(0.005, self.config.depth_loss_mult * 0.9995)
             if self.config.use_depth_smooth_loss:
                 loss_dict["depth_smooth_loss"] = self.config.smooth_loss_lambda * self.smooth_loss(outputs["depth"])
-            
+            if len(self.touch_dataset) > 0:
+                if "touch_depth_loss" in metrics_dict:
+                    loss_dict["touch_depth_loss"] = 1  * metrics_dict["touch_depth_loss"]
         return loss_dict
 
     def get_image_metrics_and_images(
