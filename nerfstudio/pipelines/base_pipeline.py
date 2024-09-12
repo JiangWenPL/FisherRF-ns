@@ -524,18 +524,72 @@ class VanillaPipeline(Pipeline):
         """
         
         ray_bundle, batch = self.datamanager.next_train(step)
-        
         self.model.lift_depths_to_3d(ray_bundle, batch) # type: ignore
         self.model.camera = ray_bundle # type: ignore
 
         model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
+
+        if step > 10000 and step % 2000 == 1999:
+            # add a touch
+            touch_data_dir = "/home/user/touch-gs-data/mirror_data/touches/touch"
+            # parse transforms.json
+            with open(f'{touch_data_dir}/transforms_train.json', "r") as f:
+                data = json.load(f)
+            # choose a random touch:
+            frames = data['frames']
+
+            cam_info  = {
+                'fx': 200,
+                'fy': 200,
+                'cx': 320,
+                'cy': 320,
+            }
+            touch_idx = random.randint(0, len(frames) - 1)
+            touch_frame = frames[touch_idx]
+
+            # get touch pose
+            touch_pose = np.array(touch_frame['transform_matrix'])
+            touch_file_path = touch_frame['file_path']
+            # split the path
+            touch_file_path = touch_file_path.split('/')[-1]
+            # split by .
+            touch_file_path = touch_file_path.split('.')[0]
+            touch_file_path = f"{touch_data_dir}/train/{touch_file_path}_zmap.png"
+            # read in depth
+            depth = cv2.imread(touch_file_path, cv2.IMREAD_UNCHANGED) / 1000.0
+            depth = depth / 1000.0
+
+            sample_cam, _ = self.datamanager.get_cam_data_from_idx(0) # type: ignore
+            # copy the camera
+            dt_cam = copy.deepcopy(sample_cam)
+            dt_cam.metadata = None 
+            dt_cam.cx[0][0] = cam_info['cx']
+            dt_cam.cy[0][0] = cam_info['cy']
+            dt_cam.fx[0][0] = cam_info['fx']
+            dt_cam.fy[0][0] = cam_info['fy']
+            dt_cam.width = 640
+            dt_cam.height = 640
+
+            touch_pose_torch = torch.from_numpy(touch_pose.astype(np.float32)).to(self.device)
+            dt_cam.camera_to_worlds = touch_pose_torch[:3, :4].unsqueeze(0)
+
+            depth = torch.tensor(depth).to(self.device)
+
+            self.model.add_touch_gaussians(touch_pose, cam_info, depth) # type: ignore
+            self.model.add_touch_cam(dt_cam, depth) # type: ignore
+
+            # next_view, acq_scores = self.run_nbv(rgb_weight=0.0, depth_weight=1.0, is_touch=False)
+            # self.datamanager.add_new_view(next_view) # type: ignore
+            # self.model.camera_optimizer.add_camera() # type: ignore
+
         
-        if step % 2000 == 1999:
+        if step % 2000 == -1:
             # if False:
             if self.added_views_so_far < self.views_to_add:
                 # add views to the training set if we can
+
                 next_view, acq_scores = self.run_nbv(rgb_weight=0.0, depth_weight=1.0, is_touch=False)
                 
                 # send acquired scores in ROS

@@ -98,6 +98,7 @@ def eval_setup(
     
     print(test_on_other_dataset_str)
     # test_on_other_dataset_str = None
+    config.pipeline.datamanager.dataparser.train_split_fraction=0.95
     if test_on_other_dataset_str is not None:
         # change config such that the path is eval and we only test on the other dataset
         dataset_path = Path(test_on_other_dataset_str)

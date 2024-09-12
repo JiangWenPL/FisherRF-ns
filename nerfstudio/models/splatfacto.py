@@ -625,7 +625,7 @@ class SplatfactoModel(Model):
     def dup_in_all_optim(self, optimizers, dup_mask, n, add_gaussians=False):
         param_groups = self.get_gaussian_param_groups()
         for group, param in param_groups.items():
-            if group != "normals":
+            if group != "normals" and group != "sam_mask":
                 if add_gaussians:
                     self.dup_in_optim_add_gaussians(optimizers.optimizers[group], dup_mask.shape[0], param)
                 else:
