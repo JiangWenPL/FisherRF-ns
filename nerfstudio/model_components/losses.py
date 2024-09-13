@@ -289,6 +289,30 @@ def pred_normal_loss(
     """Loss between normals calculated from density and normals from prediction network."""
     return (weights[..., 0] * (1.0 - torch.sum(normals * pred_normals, dim=-1))).sum(dim=-1)
 
+def basic_touch_depth_loss(
+    termination_depth: Float[Tensor, "*batch 1"],
+    predicted_depth: Float[Tensor, "*batch 1"],
+    mask: Optional[Bool[Tensor, "*batch 1"]] = None,
+)-> Float[Tensor, "*batch 1"]:
+    # depths are only considered valid if they are greater than 0. 0 depth info means no depth info
+    if mask is not None:
+        termination_depth = termination_depth * mask
+    depth_mask = termination_depth > 0
+    
+    expected_depth_loss = (termination_depth - predicted_depth) ** 2
+    expected_depth_loss = expected_depth_loss * depth_mask
+    
+    min_gt_depth = torch.min(termination_depth[depth_mask])
+    
+    # Penalize predicted depth if it is less than the minimum GT depth
+    penalty_loss = torch.where(predicted_depth < min_gt_depth, 
+                               (min_gt_depth - predicted_depth) ** 2, 
+                               torch.zeros_like(predicted_depth))
+    
+    total_loss = expected_depth_loss + penalty_loss
+    
+    return torch.mean(total_loss)
+
 
 def basic_depth_loss(
     termination_depth: Float[Tensor, "*batch 1"],

@@ -46,7 +46,7 @@ from nerfstudio.engine.optimizers import Optimizers
 # need following import for background color override
 from nerfstudio.model_components import renderers
 from nerfstudio.model_components import losses
-from nerfstudio.model_components.losses import DepthLossType, EdgeAwareTV, TVLoss, basic_depth_loss, depth_ranking_loss, depth_uncertainty_weighted_loss, pearson_correlation_depth_loss
+from nerfstudio.model_components.losses import DepthLossType, EdgeAwareTV, TVLoss, basic_depth_loss, basic_touch_depth_loss, depth_ranking_loss, depth_uncertainty_weighted_loss, pearson_correlation_depth_loss
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils.colors import get_color
 from nerfstudio.utils.rich_utils import CONSOLE
@@ -112,6 +112,9 @@ class DepthSplatfactoModel(SplatfactoModel):
         self.lifted_depths = np.zeros(100)
         self.new_gauss_params = None
         self.cull_mask = None
+        self.top_position = None
+        self.bottom_position = None
+        self.counter = 0
         
         # set touch dataset
         self.touch_dataset = []
@@ -161,13 +164,14 @@ class DepthSplatfactoModel(SplatfactoModel):
         means = self.means.detach().cpu().numpy()
         mask = self.are_points_in_cylinder(top_point, bottom_point, radius, means)
         self.cull_mask = self.cull_gaussians_by_mask(mask)
+        self.top_position = top_point
+        self.bottom_position = bottom_point
         
     def update_optimizer_with_cull_mask(self, optimizers: Optimizers):
         """
         Update the optimizer with the cull mask.
         """
         if self.cull_mask is not None:
-            import pdb; pdb.set_trace()
             self.remove_from_all_optim(optimizers, self.cull_mask)
             self.cull_mask = None
     
@@ -341,19 +345,24 @@ class DepthSplatfactoModel(SplatfactoModel):
             self.depth_sigma = torch.tensor([self.config.depth_sigma])
             
     def get_metrics_dict(self, outputs, batch):
-        metrics_dict = super().get_metrics_dict(outputs, batch)
-        
         # sample a random touch camera
-        if False:
+        metrics_dict = {}
+        if len(self.touch_dataset) > 0:
+            # sample a random touch camera
             touch_info = self.touch_dataset[np.random.randint(0, len(self.touch_dataset))]
             touch_cam = touch_info[0]
             termination_depth = touch_info[1]
-            outputs = self.get_outputs(touch_cam)
-            touch_depth = outputs["depth"]
             termination_depth = termination_depth.to(self.device)
-            # reguarlize depth from touch very strictly.
-            metrics_dict["touch_depth_loss"] = basic_depth_loss(
+            touch_outputs = self.get_outputs(touch_cam)
+            touch_depth = touch_outputs["depth"]
+            metrics_dict["touch_depth_loss"] = basic_touch_depth_loss(
                 termination_depth, touch_depth, None)
+            
+            metrics_dict["depth"] = touch_depth
+            
+            return metrics_dict
+                
+        metrics_dict = super().get_metrics_dict(outputs, batch)
             
         if self.training:
             if (
@@ -465,6 +474,16 @@ class DepthSplatfactoModel(SplatfactoModel):
                     self.new_gauss_params = None
    
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
+        if len(outputs) == 0:
+            loss_dict = {}
+            assert metrics_dict is not None
+            if len(self.touch_dataset) > 0:
+                if "touch_depth_loss" in metrics_dict:
+                    loss_dict["touch_depth_loss"] = 0.1 * metrics_dict["touch_depth_loss"]
+                    
+                    return loss_dict
+                    
+        
         loss_dict = super().get_loss_dict(outputs, batch, metrics_dict)
         if self.training:
             assert metrics_dict is not None and ("depth_loss" in metrics_dict or "depth_ranking" in metrics_dict)
@@ -476,10 +495,13 @@ class DepthSplatfactoModel(SplatfactoModel):
                 )
             if "depth_loss" in metrics_dict:
                 loss_dict["depth_loss"] = self.config.depth_loss_mult * metrics_dict["depth_loss"]
-        # if self.config.depth_loss_mult >= 0.005:
-        #     self.config.depth_loss_mult = max(0.005, self.config.depth_loss_mult * 0.9995)
+    
             if self.config.use_depth_smooth_loss:
                 loss_dict["depth_smooth_loss"] = self.config.smooth_loss_lambda * self.smooth_loss(outputs["depth"])
+                
+            if len(self.touch_dataset) > 0:
+                if "touch_depth_loss" in metrics_dict:
+                    loss_dict["touch_depth_loss"] = 0.1 * metrics_dict["touch_depth_loss"]
             
         return loss_dict
 
