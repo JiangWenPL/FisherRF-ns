@@ -27,13 +27,26 @@ def get_image_mask_tensor_from_path(filepath: Path, scale_factor: float = 1.0) -
     Utility function to read a mask image from the given path and return a boolean tensor
     """
     pil_mask = Image.open(filepath)
+    cv_mask = cv2.imread(str(filepath), cv2.IMREAD_UNCHANGED)
+    # convert 0, 255 mask to 0, 1 boolean mask
+    if cv_mask is not None:
+        # shape of cv_mask is (H, W)
+        mask = cv_mask == 255
+        # convert to bool tensor
+        mask_tensor = torch.from_numpy(mask).bool()
+        return mask_tensor        
+    
     if scale_factor != 1.0:
         width, height = pil_mask.size
         newsize = (int(width * scale_factor), int(height * scale_factor))
         pil_mask = pil_mask.resize(newsize, resample=Image.NEAREST)
-    mask_tensor = torch.from_numpy(np.array(pil_mask)).unsqueeze(-1).bool()
+    # take only the first channel
+    mask = np.array(pil_mask)[..., 0]
+    # save mask to viz
+    mask_tensor = torch.from_numpy(mask).unsqueeze(-1).bool()
     if len(mask_tensor.shape) != 3:
-        raise ValueError("The mask image should have 1 channel")
+        raise ValueError(f"The mask image should have 1 channel, {filepath}")
+
     return mask_tensor
 
 
@@ -54,6 +67,17 @@ def get_semantics_and_mask_tensors_from_path(
     semantics = torch.from_numpy(np.array(pil_image, dtype="int64"))[..., None]
     mask = torch.sum(semantics == mask_indices, dim=-1, keepdim=True) == 0
     return semantics, mask
+
+def get_normal_image_from_path(
+    filepath: Path,
+    height: int,
+    width: int,
+    interpolation: int = cv2.INTER_NEAREST,
+) -> torch.Tensor:
+    # read normal image
+    image = cv2.imread(str(filepath.absolute()))
+    image = cv2.resize(image, (width, height), interpolation=interpolation)
+    return torch.tensor(image)
 
 
 def get_depth_image_from_path(

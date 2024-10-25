@@ -163,6 +163,8 @@ class DataParser:
             DataparserOutputs containing data for the specified dataset and split
         """
         dataparser_outputs = self._generate_dataparser_outputs(split, **kwargs)
+        add_view = kwargs.get("add_view", False)
+        
         return dataparser_outputs
 
 

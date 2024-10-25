@@ -131,7 +131,6 @@ class Cameras(TensorDataclass):
         must be broadcastable to the same size, and the resulting number of batch dimensions will be
         the batch dimension with the largest number of dimensions.
         """
-
         # This will notify the tensordataclass that we have a field with more than 1 dimension
         self._field_custom_dimensions = {"camera_to_worlds": 2}
 

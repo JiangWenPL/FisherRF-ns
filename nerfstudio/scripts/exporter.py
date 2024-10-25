@@ -29,6 +29,7 @@ from typing import List, Optional, Tuple, Union, cast
 
 import numpy as np
 import open3d as o3d
+from tqdm import tqdm
 import torch
 import tyro
 from typing_extensions import Annotated, Literal
@@ -45,6 +46,84 @@ from nerfstudio.models.splatfacto import SplatfactoModel
 from nerfstudio.pipelines.base_pipeline import Pipeline, VanillaPipeline
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.rich_utils import CONSOLE
+
+from copy import deepcopy
+
+def focus_point_fn(poses: np.ndarray) -> np.ndarray:
+    """Calculate nearest point to all focal axes in poses."""
+    directions, origins = poses[:, :3, 2:3], poses[:, :3, 3:4]
+    m = np.eye(3) - directions * np.transpose(directions, [0, 2, 1])
+    mt_m = np.transpose(m, [0, 2, 1]) @ m
+    focus_pt = np.linalg.inv(mt_m.mean(0)) @ (mt_m @ origins).mean(0)[:, 0]
+    return focus_pt
+
+def estimate_bounding_sphere(cams):
+    """
+    Estimate the bounding sphere given camera pose
+    """
+    c2ws = np.array([np.linalg.inv(np.asarray(cam.extrinsic)) for cam in cams])
+    poses = c2ws[:,:3,:] @ np.diag([1, -1, -1, 1])
+    center = (focus_point_fn(poses))
+    radius = np.linalg.norm(c2ws[:,:3,3] - center, axis=-1).min()
+    # center = torch.from_numpy(center).float().cuda()
+    print(f"The estimated bounding radius is {radius:.2f}")
+    print(f"Use at least {2.0 * radius:.2f} for depth_trunc")
+
+    return radius
+
+def post_process_mesh(mesh, cluster_to_keep=1000):
+    """
+    Post-process a mesh to filter out floaters and disconnected parts
+    """
+    import copy
+    print("post processing the mesh to have {} clusterscluster_to_kep".format(cluster_to_keep))
+    mesh_0 = copy.deepcopy(mesh)
+    with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Debug) as cm:
+            triangle_clusters, cluster_n_triangles, cluster_area = (mesh_0.cluster_connected_triangles())
+
+    triangle_clusters = np.asarray(triangle_clusters)
+    cluster_n_triangles = np.asarray(cluster_n_triangles)
+    cluster_area = np.asarray(cluster_area)
+    n_cluster = np.sort(cluster_n_triangles.copy())[-cluster_to_keep]
+    n_cluster = max(n_cluster, 50) # filter meshes smaller than 50
+    triangles_to_remove = cluster_n_triangles[triangle_clusters] < n_cluster
+    mesh_0.remove_triangles_by_mask(triangles_to_remove)
+    mesh_0.remove_unreferenced_vertices()
+    mesh_0.remove_degenerate_triangles()
+    print("num vertices raw {}".format(len(mesh.vertices)))
+    print("num vertices post {}".format(len(mesh_0.vertices)))
+    return mesh_0
+
+def to_cam_open3d(cam):
+    # shift the camera to center of scene looking at center
+    R = cam.camera_to_worlds[0, :3, :3]  # 3 x 3
+    T = cam.camera_to_worlds[0, :3, 3:4]  # 3 x 1
+
+    # flip the z and y axes to align with gsplat conventions
+    R_edit = torch.diag(torch.tensor([1, -1, -1], device=R.device, dtype=R.dtype))
+    R = R @ R_edit
+    # analytic matrix inverse to get world2camera matrix
+    R_inv = R.T
+    T_inv = -R_inv @ T
+    viewmat = torch.eye(4, device=R.device, dtype=R.dtype)
+    viewmat[:3, :3] = R_inv
+    viewmat[:3, 3:4] = T_inv
+    
+    intrinsic=o3d.camera.PinholeCameraIntrinsic(
+        width = cam.width.item(),
+        height = cam.height.item(),
+        cx = cam.cx.item(),
+        cy = cam.cy.item(), 
+        fx = cam.fx.item(), 
+        fy = cam.fy.item()
+    )
+
+    extrinsic = np.asarray(viewmat.cpu().numpy())
+    camera = o3d.camera.PinholeCameraParameters()
+    camera.extrinsic = extrinsic
+    camera.intrinsic = intrinsic
+
+    return camera
 
 
 @dataclass
@@ -593,6 +672,143 @@ class ExportGaussianSplat(Exporter):
                 map_to_tensors[k] = map_to_tensors[k][select, :]
 
         ExportGaussianSplat.write_ply(str(filename), count, map_to_tensors)
+        render_key = "rgb"
+        depth_key = "depth"
+
+        # render mesh
+        # extract mesh 
+        rgbmaps = []
+        depthmaps = []
+        o3d_cams = []
+        cam_json = []
+        for image_idx in tqdm(range(len(pipeline.datamanager.cached_train)), desc="Render Training Image ..."): # type: ignore
+
+            assert len(pipeline.datamanager.train_dataset.cameras.shape) == 1, "Assumes single batch dimension" # type: ignore
+            camera = pipeline.datamanager.train_dataset.cameras[image_idx : image_idx + 1].to(pipeline.datamanager.device) # type: ignore
+            if camera.metadata is None:
+                camera.metadata = {}
+            camera.metadata["cam_idx"] = image_idx
+
+            data = deepcopy(pipeline.datamanager.cached_train[image_idx]) # type: ignore
+            gt_image = data["image"]
+
+            # forward pass
+            with torch.no_grad():
+                render_pkg = pipeline.model(camera)
+
+                rgb = render_pkg[render_key]
+                depth = render_pkg[depth_key].squeeze()
+
+                if gt_image.shape[2] > 3:
+                    depth[gt_image[..., 3] < 0.5] = 0.
+
+                o3d_cam = to_cam_open3d(camera)
+                rgbmaps.append(rgb.cpu())
+                depthmaps.append(depth.cpu())
+                o3d_cams.append(o3d_cam)
+
+                # use the data from o3d camera structure 
+                rotation = o3d_cam.extrinsic[:3, :3]
+                translation = o3d_cam.extrinsic[:3, 3]
+
+                position_list = translation.tolist()
+                rotation_list = [r.tolist() for r in rotation]
+
+                # convert to json file
+                cam_dict = dict(
+                    id=image_idx,
+                    width=camera.width.item(),
+                    height=camera.height.item(),
+                    fx=camera.fx.item(),
+                    fy=camera.fy.item(),
+                    position=position_list,
+                    rotation=rotation_list,
+                )
+                cam_json.append(cam_dict)
+                
+                # data = deepcopy(pipeline.datamanager.cached_train[image_idx]) # type: ignore
+                # masks.append(data["mask"])
+
+        rgbmaps = torch.stack(rgbmaps, dim=0)
+        depthmaps = torch.stack(depthmaps, dim=0)
+
+        # dump to json file
+        with open(os.path.join(self.output_dir, "cameras.json"), "w") as f:
+            json.dump(cam_json, f)
+
+        depth_trunc = 3.0
+        mesh_res = 1024
+        sdf_trunc = 0.016
+        num_cluster = 1
+
+        name = 'fuse.ply'
+        radius = estimate_bounding_sphere(o3d_cams)
+        depth_trunc = (radius * 2.0) if depth_trunc < 0  else depth_trunc # type: ignore
+        voxel_size = (depth_trunc / mesh_res) # type: ignore
+        sdf_trunc = 5.0 * voxel_size if sdf_trunc < 0 else sdf_trunc # type: ignore
+        mesh = self.extract_mesh_bounded(rgbmaps, depthmaps, o3d_cams, voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc) # type: ignore
+
+        # vertices = np.asarray(mesh.vertices)
+        # # TODO flip the z and y axes to align with gsplat conventions
+        # vertices[:, [2, 1]] = vertices[:, [1, 2]]
+        # vertices[:, 1] = -1 * vertices[:, 1]
+        # mesh.vertices = o3d.utility.Vector3dVector(vertices)
+
+        o3d.io.write_triangle_mesh(os.path.join(self.output_dir, name), mesh)
+        print("mesh saved at {}".format(os.path.join(self.output_dir, name)))
+
+        mesh_post = post_process_mesh(mesh, cluster_to_keep=num_cluster)
+        o3d.io.write_triangle_mesh(os.path.join(self.output_dir, name.replace('.ply', '_post.ply')), mesh_post)
+
+        # TODO cull the 3D mesh with masks
+        # if len(masks) > 0:
+        #     cull_mesh(os.path.join(self.output_dir, name.replace('.ply', '_post.ply')), masks, o3d_cams)
+
+    @torch.no_grad()
+    def extract_mesh_bounded(self, rgbmaps, depthmaps, o3d_cams,
+                             voxel_size=0.004, sdf_trunc=0.02, depth_trunc=3, mask_backgrond=True):
+        """
+        Perform TSDF fusion given a fixed depth range, used in the paper.
+        
+        voxel_size: the voxel size of the volume
+        sdf_trunc: truncation value
+        depth_trunc: maximum depth range, should depended on the scene's scales
+        mask_backgrond: whether to mask backgroud, only works when the dataset have masks
+
+        return o3d.mesh
+        """
+        print("Running tsdf volume integration ...")
+        print(f'voxel_size: {voxel_size}')
+        print(f'sdf_trunc: {sdf_trunc}')
+        print(f'depth_truc: {depth_trunc}')
+
+        volume = o3d.pipelines.integration.ScalableTSDFVolume(
+            voxel_length= voxel_size,
+            sdf_trunc=sdf_trunc,
+            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+        )
+
+
+        for i, cam_o3d in tqdm(enumerate(o3d_cams), desc="TSDF integration progress"):
+            rgb = rgbmaps[i]
+            depth = depthmaps[i]
+            
+            # # if we have mask provided, use it
+            # if mask_backgrond and (self.viewpoint_stack[i].gt_alpha_mask is not None):
+            #     depth[(self.viewpoint_stack[i].gt_alpha_mask < 0.5)] = 0
+
+            # make open3d rgbd
+            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                o3d.geometry.Image(np.asarray(rgb.cpu().numpy() * 255, order="C", dtype=np.uint8)),
+                o3d.geometry.Image(np.asarray(depth.cpu().numpy(), order="C")),
+                depth_trunc = depth_trunc, convert_rgb_to_intensity=False,
+                depth_scale = 1.0
+            )
+
+            volume.integrate(rgbd, intrinsic=cam_o3d.intrinsic, extrinsic=cam_o3d.extrinsic)
+
+        mesh = volume.extract_triangle_mesh()
+        return mesh
 
 
 Commands = tyro.conf.FlagConversionOff[

@@ -521,6 +521,8 @@ def auto_orient_and_center_poses(
     poses: Float[Tensor, "*num_poses 4 4"],
     method: Literal["pca", "up", "vertical", "none"] = "up",
     center_method: Literal["poses", "focus", "none"] = "poses",
+    mean_origin: Optional[Float[Tensor, "3"]] = None,
+    mean_up: Optional[Float[Tensor, "3"]] = None,
 ) -> Tuple[Float[Tensor, "*num_poses 3 4"], Float[Tensor, "3 4"]]:
     """Orients and centers the poses.
 
@@ -553,8 +555,9 @@ def auto_orient_and_center_poses(
     """
 
     origins = poses[..., :3, 3]
-
-    mean_origin = torch.mean(origins, dim=0)
+    
+    if mean_origin is None:
+        mean_origin = torch.mean(origins, dim=0)
     translation_diff = origins - mean_origin
 
     if center_method == "poses":
@@ -562,7 +565,7 @@ def auto_orient_and_center_poses(
     elif center_method == "focus":
         translation = focus_of_attention(poses, mean_origin)
     elif center_method == "none":
-        translation = torch.zeros_like(mean_origin)
+        translation = torch.zeros_like(mean_origin) # type: ignore
     else:
         raise ValueError(f"Unknown value for center_method: {center_method}")
 
@@ -580,6 +583,8 @@ def auto_orient_and_center_poses(
             oriented_poses[:, 1:3] = -1 * oriented_poses[:, 1:3]
     elif method in ("up", "vertical"):
         up = torch.mean(poses[:, :3, 1], dim=0)
+        if mean_up is not None:
+            up = mean_up
         up = up / torch.linalg.norm(up)
         if method == "vertical":
             # If cameras are not all parallel (e.g. not in an LLFF configuration),

@@ -45,6 +45,10 @@ from nerfstudio.utils.writer import EventName, TimeWriter
 from nerfstudio.viewer.viewer import Viewer as ViewerState
 from nerfstudio.viewer_legacy.server.viewer_state import ViewerLegacyState
 
+import rospy
+from std_srvs.srv import Trigger, TriggerResponse, TriggerRequest
+
+
 TRAIN_INTERATION_OUTPUT = Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor]]
 TORCH_DEVICE = str
 
@@ -293,6 +297,17 @@ class Trainer:
 
         # save checkpoint at the end of training
         self.save_checkpoint(step)
+        # send a service call in ROS that we are done.
+        # rospy.wait_for_service('finish_training')
+        # rospy.loginfo("Calling service to complete training")
+        # finish_training_client = rospy.ServiceProxy("/finish_training", Trigger)
+        
+        # req = TriggerRequest()
+        # res = finish_training_client(req)
+        # if res.success:
+        #     rospy.loginfo("Finished training sent to robot SUCCEEDED.")
+        # else:
+        #     rospy.loginfo("Finished training sent to robot FAILED.")
 
         # write out any remaining events (e.g., total train time)
         writer.write_out_storage()
@@ -351,6 +366,7 @@ class Trainer:
         num_rays_per_batch: int = self.pipeline.datamanager.get_train_rays_per_batch()
         try:
             self.viewer_state.update_scene(step, num_rays_per_batch)
+            self.viewer_state.add_last_camera(self.pipeline.datamanager.train_dataset) # type: ignore
         except RuntimeError:
             time.sleep(0.03)  # sleep to allow buffer to reset
             CONSOLE.log("Viewer failed. Continuing training.")
@@ -469,6 +485,9 @@ class Trainer:
 
         with torch.autocast(device_type=cpu_or_cuda_str, enabled=self.mixed_precision):
             _, loss_dict, metrics_dict = self.pipeline.get_train_loss_dict(step=step)
+            # remove the gaussians from cull mask
+            self.pipeline.model.update_optimizer_with_cull_mask(self.optimizers) # type: ignore
+            
             loss = functools.reduce(torch.add, loss_dict.values())
         self.grad_scaler.scale(loss).backward()  # type: ignore
         needs_step = [

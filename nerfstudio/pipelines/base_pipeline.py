@@ -17,6 +17,10 @@ Abstracts for the Pipeline class.
 """
 from __future__ import annotations
 
+import json
+import cv2
+
+import random
 import typing
 from abc import abstractmethod
 from dataclasses import dataclass, field
@@ -39,6 +43,23 @@ from nerfstudio.data.datamanagers.parallel_datamanager import ParallelDataManage
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import profiler
+from nerfstudio.utils.ros_utils import convertPose2Numpy
+
+from nerfstudio.cameras.cameras import Cameras
+
+from einops import repeat, reduce, rearrange
+
+from tqdm import tqdm
+import copy
+
+# ROS related imports
+import rospy
+from std_msgs.msg import String
+from gaussian_splatting.srv import NBVPoses, NBVPosesRequest, NBVPosesResponse, NBVResultRequest, NBVResultResponse, NBVResult
+from geometry_msgs.msg import PoseStamped, Pose, Transform, TransformStamped
+from std_srvs.srv import Trigger, TriggerResponse, TriggerRequest
+
+import numpy as np
 
 
 def module_wrapper(ddp_or_model: Union[DDP, Model]) -> Model:
@@ -140,7 +161,6 @@ class Pipeline(nn.Module):
         model_outputs = self.model(ray_bundle, batch)
         metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
         loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
-
         return model_outputs, loss_dict, metrics_dict
 
     @profiler.time_function
@@ -254,6 +274,29 @@ class VanillaPipeline(Pipeline):
         self.datamanager: DataManager = config.datamanager.setup(
             device=device, test_mode=test_mode, world_size=world_size, local_rank=local_rank
         )
+        
+        # ROS specific code
+        rospy.init_node('nerf_pipeline', anonymous=True)
+        rospy.loginfo("Starting the pipeline node!")
+        self.touch_phase = False
+        
+        # import pdb; pdb.set_trace()
+
+        # get random or fisher param
+        self.view_selection_method = rospy.get_param('view_selection_method', 'fisher')
+
+        # get views to add 
+        self.views_to_add = int(rospy.get_param('views_to_add', 10)) # type: ignore
+        
+        self.touches_to_add = int(rospy.get_param('touches_to_add', 5)) # type: ignore
+ 
+        self.added_views_so_far = 0
+        self.added_touches_so_far = 0
+        
+        self.new_view_ready = False
+        # create service to receive 
+        self.continue_training_srv = rospy.Service('continue_training', Trigger, self.continue_training)
+        
         # TODO make cleaner
         seed_pts = None
         if (
@@ -286,6 +329,190 @@ class VanillaPipeline(Pipeline):
     def device(self):
         """Returns the device that the model is on."""
         return self.model.device
+    
+    def continue_training(self, req: TriggerRequest) -> TriggerResponse:
+        rospy.loginfo(f"Received request to continue training: {req}")
+        self.new_view_ready = True
+        
+        # add new view to the training set
+        res = TriggerResponse()
+        res.success = True
+        return res
+    
+    
+    def fisher_single_view(self, training_views: List[int], candidate_views: List[np.ndarray],
+                           rgb_weight=1.0, depth_weight=1.0, camera_info=None) -> Tuple[int, List[float]]:
+        # construct initial Hessian matrix from the current training data
+        H_train = None
+        sample_cam: Cameras = None # type: ignore
+        scale_factor = self.datamanager.train_dataparser_outputs.dataparser_scale  # type: ignore
+        
+        for view in training_views:
+            # get full camera from view idx
+            cam, batch = self.datamanager.get_cam_data_from_idx(view)
+            if sample_cam is None:
+                sample_cam = cam
+                
+            cur_H: torch.tensor = self.compute_hessian(cam, rgb_weight, depth_weight) # type: ignore
+            
+            if H_train is None:
+                H_train = cur_H
+            else:
+                H_train += cur_H
+                
+        H_train = H_train.to(self.device) # type: ignore
+        reg_lambda = 1e-6
+        I_train = torch.reciprocal(H_train + reg_lambda)
+        
+        acq_scores = torch.zeros(len(candidate_views)) # type: ignore
+        rospy.loginfo("Hessian computed! Computing NBV...")
+        
+        # go through each candidate camera and calculate the acq score
+        for idx, view_pos in enumerate(tqdm(candidate_views, desc="Computing acq scores")):
+            # copy sample_cam and update the pose
+            cam = copy.deepcopy(sample_cam)
+            if camera_info is not None:
+                cam.fx[0][0] = camera_info['fx']
+                cam.fy[0][0] = camera_info['fy']
+                cam.cx[0][0] = camera_info['cx']
+                cam.cy[0][0] = camera_info['cy']
+                cam.width[0][0] = camera_info['w']
+                cam.height[0][0] = camera_info['h']
+                
+                self.dt_cam = cam
+                
+            cam.metadata = None
+            
+            view_pos = torch.from_numpy(view_pos.astype(np.float32)).to(self.device)
+            view_pos[:3, 3] *= scale_factor
+            cam.camera_to_worlds = view_pos[:3, :4].unsqueeze(0)
+            
+            # if camera_info is not None, it is a touch view
+            is_touch = camera_info is not None
+            
+            cur_H: torch.tensor = self.compute_hessian(cam, rgb_weight, depth_weight, is_touch=is_touch) # type: ignore
+            I_acq = cur_H
+            acq_scores[idx] = torch.sum(I_acq * I_train).item()
+
+        # arbitrary scaling to have the scales be readable
+        if camera_info is not None:
+            acq_scores /= 100000
+        else:
+            acq_scores /= 1000000000000
+        print(f"acq_scores: {acq_scores.tolist()}")
+        
+        # take max of acq score and return the view idx
+        _, indices = torch.sort(acq_scores, descending=True)
+        top_idx = indices[0]
+        
+        selected_idx = int(top_idx)
+        print('Selected views:', selected_idx)
+        return selected_idx, acq_scores.tolist()
+        
+    
+    def view_selection(self, training_views: List[int], candidate_views: List[np.ndarray], option='random',
+                       rgb_weight=1.0, depth_weight=1.0,
+                       camera_info=None) -> Tuple[int, List[float]]: # type: ignore
+        """
+        Args:
+            training_views (List[int]): List of training views by index.
+            candidate_views (List[np.ndarray]): Candidate views to select from -- a list of poses.
+            option (str, optional): The method of view selection. Either random or fisher. Defaults to 'random'.
+            rgb_weight (float, optional): RGB weight for Fisherrf. Defaults to 1.0.
+            depth_weight (float, optional): Depth weight for Fisherrf. Defaults to 1.0.
+            is_touch (bool, optional): whether the view is a touch view. Defaults to False.
+
+        Returns:
+            Tuple[int, List[float]]: _description_
+        """
+        if option == 'random':
+            # construct scores based on number of candidate views
+            scores = [random.random() for _ in range(len(candidate_views))]
+            # get argmax of scores
+            max_idx = scores.index(max(scores))
+            return max_idx, scores
+        
+        elif option == "fisher":
+            # use fisher information to select the next view
+            selected_view, acq_scores = self.fisher_single_view(training_views, candidate_views, rgb_weight, depth_weight,
+                                                                camera_info=camera_info) # type: ignore
+            return selected_view, acq_scores # type: ignore 
+
+        elif option == "fisher-multi-view":
+            # batch fisher information to select the next views
+            scores = [random.random() for _ in range(len(candidate_views))]
+            # get argmax of scores
+            max_idx = scores.index(max(scores))
+            return max_idx, scores
+        else:
+            # otherwise, select the first view in list. Not recommended.
+            max_idx = 0
+            scores = [100.0 - i for i in range(len(candidate_views))]
+            return max_idx, scores
+        
+    def call_get_nbv_poses(self) -> List[np.ndarray]:
+        rospy.wait_for_service('get_poses')
+        rospy.loginfo("Calling service to get NBV poses")
+        poses = []
+        
+        # make service call to get the list of avail poses
+        try:
+            get_nbv_poses = rospy.ServiceProxy('get_poses', NBVPoses)
+            req = NBVPosesRequest()
+            response: NBVPosesResponse = get_nbv_poses(req)
+            if response.success:
+                rospy.loginfo(f"Response Message: {response.message}")
+                poses: List[PoseStamped] = response.poses
+                ns_poses: List[np.ndarray] = [convertPose2Numpy(pose) for pose in poses] # type: ignore
+                # transform to play nice with nerfstudio
+                final_poses = []
+                for pose in ns_poses:
+                    new_pose = pose
+                    new_pose[0:3, 1:3] *= -1
+                    final_poses.append(new_pose)
+            else: 
+                rospy.loginfo("Failed to get poses. Adding no views")
+            
+        except rospy.ROSException as e:
+            rospy.loginfo(f"Service call failed: {e}")
+            
+        return final_poses
+    
+    def send_nbv_scores(self, scores) -> bool:
+        rospy.wait_for_service('receive_nbv_scores')
+        poses = []
+        
+        # make service call to get the list of avail poses
+        try:
+            receive_nbv_scores_service = rospy.ServiceProxy('receive_nbv_scores', NBVResult)
+            req = NBVResultRequest()
+            req.scores = list(scores)
+            response: NBVPosesResponse = receive_nbv_scores_service(req)
+            
+            if response.success:
+                rospy.loginfo(f"Response Message: {response.message}")
+                return True
+            else: 
+                rospy.loginfo("Failed send NBV scores. Adding no views")
+            
+        except rospy.ROSException as e:
+            rospy.loginfo(f"Service call failed: {e}")
+        return False
+    
+    def run_nbv(self, rgb_weight=1.0, depth_weight=1.0, is_touch=False, touch_poses=None,
+                camera_info=None):
+        if not is_touch:
+            avail_views = self.call_get_nbv_poses()
+        else:
+            avail_views = touch_poses
+        rospy.loginfo("Selecting new view for training")
+        current_views_idxs = self.datamanager.get_current_views()
+        
+        next_view, acq_scores = self.view_selection(current_views_idxs, avail_views, option=self.view_selection_method, # type: ignore
+                                                rgb_weight=rgb_weight, depth_weight=depth_weight, camera_info=camera_info) # type: ignore
+        
+        return next_view, acq_scores
+
 
     @profiler.time_function
     def get_train_loss_dict(self, step: int):
@@ -296,12 +523,163 @@ class VanillaPipeline(Pipeline):
         Args:
             step: current iteration step to update sampler if using DDP (distributed)
         """
+        
         ray_bundle, batch = self.datamanager.next_train(step)
-        model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
-        metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
-        loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
+        
+        self.model.lift_depths_to_3d(ray_bundle, batch) # type: ignore
+        self.model.camera = ray_bundle # type: ignore
+        if not self.touch_phase:
+            model_outputs = self._model(ray_bundle)  # train distributed data parallel model if world_size > 1
+            metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
+            loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
+        else: 
+            # touch phase
+            metrics_dict = self.model.get_metrics_dict({}, batch)
+            loss_dict = self.model.get_loss_dict({}, batch, metrics_dict)
+            model_outputs = {}
+            model_outputs['depth'] = metrics_dict['depth']
+        if step > 10000 and step % 100 == 99:
+            if False:
+            # if self.added_views_so_far < self.views_to_add:
+                # add views to the training set if we can
+                next_view, acq_scores = self.run_nbv(rgb_weight=0.0, depth_weight=1.0, is_touch=False)
+                
+                # send acquired scores in ROS
+                success = self.send_nbv_scores(acq_scores)
+                
+                rate = rospy.Rate(1)  # 1 Hz    
+                while not rospy.is_shutdown() and not self.new_view_ready:
+                    rospy.loginfo("Waiting for Robot Node to Be Done...")
+                    rate.sleep()
+                rospy.loginfo("GS taking new view!")
+                if success:
+                    self.datamanager.add_new_view(next_view) # type: ignore
+                    self.model.camera_optimizer.add_camera() # type: ignore
+                    print("Added new view succesfully.")
+                    # new view is not ready now
+                    self.new_view_ready = False
+                    self.added_views_so_far += 1
 
+            else:
+                if self.added_touches_so_far < self.touches_to_add:
+                    # add new touch!! 
+                    self.touch_phase = True
+                    rospy.loginfo("Adding new touch view!")
+                    
+                    # for now, get from the list of touches
+                    touch_data_dir = "/home/user/NextBestSense/data/ridge_touch/touch"
+                    
+                    with open(f'{touch_data_dir}/transforms.json', "r") as f:
+                        data = json.load(f)
+                        
+                    import pdb; pdb.set_trace()
+                        
+                    frames = data['frames']
+                    
+                    poses = []
+                    diff = 0.25  # 25 cm away from the touch in the negative z direction
+                    orig_touch_poses = []
+                    for frame in frames:
+                        pose = frame['transformation']
+                        pose_np = np.array(pose).reshape(4, 4)
+                        # add poses along the z in the negative direction
+                        z = pose_np[0:3, 2]
+                        
+                        orig_pose = pose_np.copy()
+                        orig_pose[0:3, 1:3] *= -1
+                        orig_touch_poses.append(orig_pose)
+                        
+                        # update the position in pose_np
+                        pose_np[0:3, 3] -= (diff * z)
+                        pose_np[0:3, 1:3] *= -1
+                        poses.append(pose_np)
+                        
+                    camera_info  = {
+                        'fx': 200,
+                        'fy': 200,
+                        'cx': 320,
+                        'cy': 320,
+                    }
+                    camera_info['h'] = data['h']
+                    camera_info['w'] = data['w']
+                        
+                    # get next best touch
+                    next_touch, acq_scores = self.run_nbv(rgb_weight=0.0, depth_weight=1.0, is_touch=True, 
+                                                        touch_poses=poses, camera_info=camera_info)
+                    
+                    # get depth of the touch
+                    touch_file_path = frames[next_touch]['file_path']
+                    touch_pose = poses[next_touch]
+                    touch_file_path = touch_file_path.split('/')[-1]
+                    touch_file_path = touch_file_path.split('.')[0]
+                    touch_file_path = f"{touch_data_dir}/{touch_file_path}_zmap.png"
+                    
+                    # read in depth
+                    depth = cv2.imread(touch_file_path, cv2.IMREAD_UNCHANGED) / 1000.0
+                    depth = depth / 1000.0
+                    
+                    # set low values to zero
+                    depth[depth < 0.005] = 0.0
+                    
+                    # we have computed the best touch, now add it
+                    # real surface is higher than current surface: add the gaussians. no need to squash
+                    # start from the touch pose and slowly move the camera to the actual touch pose
+                    is_real_surface_lower = True
+                    
+                    # if trajectory is stored, break up trajectory into discrete sections and prune Gaussians
+                    if is_real_surface_lower:
+                        import pdb; pdb.set_trace()
+                        ros_touch_pose = poses[next_touch]
+                        ros_touch_pose[0:3, 1:3] *= -1
+                        z = ros_touch_pose[0:3, 2]
+                        top_position = ros_touch_pose[0:3, 3]
+                        bottom_position = top_position + (0.25 * z)
+                        
+                        # prune the Gaussians in the cylinder from n meters out to the touch
+                        self.model.prune_gaussians(top_position, bottom_position, 0.03) # type: ignore
+                        
+                    sample_cam, _ = self.datamanager.get_cam_data_from_idx(0) # type: ignore
+                    # copy the camera
+                    dt_cam = copy.deepcopy(sample_cam)
+                    dt_cam.metadata = None 
+                    dt_cam.cx[0][0] = camera_info['cx']
+                    dt_cam.cy[0][0] = camera_info['cy']
+                    dt_cam.fx[0][0] = camera_info['fx']
+                    dt_cam.fy[0][0] = camera_info['fy']
+                    dt_cam.width = 640
+                    dt_cam.height = 640
+                    
+                    touch_pose_torch = torch.from_numpy(touch_pose.astype(np.float32)).to(self.device)
+                    dt_cam.camera_to_worlds = touch_pose_torch[:3, :4].unsqueeze(0)
+                    depth = torch.tensor(depth).to(self.device)
+                    self.model.add_touch_cam(dt_cam, depth) # type: ignore
+                    
+                    # now add the Gaussians for touch! These Gaussians are less likely to be culled as they are reasonably close to the surface
+                    # self.model.add_touch_gaussians(touch_pose, camera_info, depth) # type: ignore
+                    self.added_touches_so_far += 1
+                    
+                    # add to touch dataset with dt cam and provided depth
+                    # self.model.add_touch_cam(self.dt_cam, depth) # type: ignore
+                    
+                    
+                    # add a new touch camera to GS
+                    
+                    # update all depth maps with the touch depth
+                    
         return model_outputs, loss_dict, metrics_dict
+    
+    
+    def compute_hessian(self, ray_bundle, rgb_weight, depth_weight, is_touch=False):
+        if hasattr(self.model, 'compute_diag_H_rgb_depth') and callable(getattr(self.model, 'compute_diag_H_rgb_depth')):
+            # compute the Hessian
+            H_info_rgb = self.model.compute_diag_H_rgb_depth(ray_bundle, compute_rgb_H=True, is_touch=is_touch) # type: ignore
+            H_info_rgb['H'] = [p * rgb_weight for p in H_info_rgb['H']]
+            H_per_gaussian = sum([reduce(p, "n ... -> n", "sum") for p in H_info_rgb['H']])
+            
+            H_info_depth = self.model.compute_diag_H_rgb_depth(ray_bundle, compute_rgb_H=False, is_touch=is_touch) # type: ignore
+            H_info_depth['H'] = [p * depth_weight for p in H_info_depth['H']]
+            H_per_gaussian += sum([reduce(p, "n ... -> n", "sum") for p in H_info_depth['H']])
+            return H_per_gaussian   
 
     def forward(self):
         """Blank forward method

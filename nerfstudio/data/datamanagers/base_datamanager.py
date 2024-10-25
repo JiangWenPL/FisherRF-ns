@@ -250,6 +250,75 @@ class DataManager(nn.Module):
         raise NotImplementedError
 
     @abstractmethod
+    def next_train_subset(self, step: int) -> Tuple[Union[RayBundle, Cameras], Dict]:
+        """Returns the next batch of subset data from the train data manager.
+
+        Args:
+            step: the step number of the eval image to retrieve
+        Returns:
+            A tuple of the ray bundle for the image, and a dictionary of additional batch information
+            such as the groundtruth image.
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def get_train_views_not_in_subset(self) -> List[int]:
+        """Gets the train views not in the train subset.
+        
+        Args:
+            None
+        Returns:
+            The list of train views not trained on yet.
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def get_cam_data_from_idx(self, idx: int) -> Tuple[Cameras, Dict]:
+        """Returns the camera data from the index.
+
+        Args:
+            idx: the index of the camera data to retrieve
+        Returns:
+            A tuple of the ray bundle for the image, and a dictionary of additional batch information
+            such as the groundtruth image.
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def get_current_views(self) -> List[int]:
+        """Gets the current views in the train subset.
+        
+        Args:
+            None
+        Returns:
+            The list of current views in the train subset.
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def add_new_view(self, idx: int) -> None:
+        """Adds a new view to the training data manager from the whole train dataset to the train subset.
+
+        Args:
+            idx: the index of the new view to add
+        Returns:
+            None if success. Raises an exception otherwise.
+        """
+        raise NotImplementedError
+    
+    
+    @abstractmethod
+    def add_new_pose(self) -> None:
+        """Adds a new pose to the training data manager from the whole train dataset to the train subset.
+
+        Args:
+            None
+        Returns:
+            None if success. Raises an exception otherwise.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def next_eval(self, step: int) -> Tuple[Union[RayBundle, Cameras], Dict]:
         """Returns the next batch of data from the eval data manager.
 

@@ -21,10 +21,12 @@ from typing import Dict, Literal, Optional, Tuple, cast
 import torch
 from jaxtyping import Bool, Float
 from torch import Tensor, nn
+from torchmetrics.functional.regression import pearson_corrcoef
 
 from nerfstudio.cameras.rays import RaySamples
 from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.utils.math import masked_reduction, normalized_depth_scale_and_shift
+
 
 L1Loss = nn.L1Loss
 MSELoss = nn.MSELoss
@@ -43,10 +45,77 @@ class DepthLossType(Enum):
     DS_NERF = 1
     URF = 2
     SPARSENERF_RANKING = 3
+    SIMPLE_LOSS = 4
+    DEPTH_UNCERTAINTY_WEIGHTED_LOSS = 5
+    DENSE_DEPTH_PRIORS_LOSS = 6
+    PEARSON_LOSS = 7
 
 
 FORCE_PSEUDODEPTH_LOSS = False
 PSEUDODEPTH_COMPATIBLE_LOSSES = (DepthLossType.SPARSENERF_RANKING,)
+
+
+def mean_angular_error(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
+    """Compute the mean angular error between predicted and reference normals
+
+    Args:
+        predicted_normals: [B, C, H, W] tensor of predicted normals
+        reference_normals : [B, C, H, W] tensor of gt normals
+
+    Returns:
+        mae: [B, H, W] mean angular error
+    """
+    dot_products = torch.sum(gt * pred, dim=1)  # over the C dimension
+    # Clamp the dot product to ensure valid cosine values (to avoid nans)
+    dot_products = torch.clamp(dot_products, -1.0, 1.0)
+    # Calculate the angle between the vectors (in radians)
+    mae = torch.acos(dot_products)
+    return mae
+
+class EdgeAwareTV(nn.Module):
+    """Edge Aware Smooth Loss"""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, depth: Tensor, rgb: Tensor):
+        """
+        Args:
+            depth: [batch, H, W, 1]
+            rgb: [batch, H, W, 3]
+        """
+        grad_depth_x = torch.abs(depth[..., :, :-1, :] - depth[..., :, 1:, :])
+        grad_depth_y = torch.abs(depth[..., :-1, :, :] - depth[..., 1:, :, :])
+
+        grad_img_x = torch.mean(
+            torch.abs(rgb[..., :, :-1, :] - rgb[..., :, 1:, :]), -1, keepdim=True
+        )
+        grad_img_y = torch.mean(
+            torch.abs(rgb[..., :-1, :, :] - rgb[..., 1:, :, :]), -1, keepdim=True
+        )
+
+        grad_depth_x *= torch.exp(-grad_img_x)
+        grad_depth_y *= torch.exp(-grad_img_y)
+
+        return grad_depth_x.mean() + grad_depth_y.mean()
+
+class TVLoss(nn.Module):
+    """TV loss"""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred):
+        """
+        Args:
+            pred: [batch, H, W, 3]
+
+        Returns:
+            tv_loss: [batch]
+        """
+        h_diff = pred[..., :, :-1, :] - pred[..., :, 1:, :]
+        w_diff = pred[..., :-1, :, :] - pred[..., 1:, :, :]
+        return torch.mean(torch.abs(h_diff)) + torch.mean(torch.abs(w_diff))
 
 
 def outer(
@@ -220,6 +289,86 @@ def pred_normal_loss(
     """Loss between normals calculated from density and normals from prediction network."""
     return (weights[..., 0] * (1.0 - torch.sum(normals * pred_normals, dim=-1))).sum(dim=-1)
 
+def basic_touch_depth_loss(
+    termination_depth: Float[Tensor, "*batch 1"],
+    predicted_depth: Float[Tensor, "*batch 1"],
+    mask: Optional[Bool[Tensor, "*batch 1"]] = None,
+)-> Float[Tensor, "*batch 1"]:
+    # depths are only considered valid if they are greater than 0. 0 depth info means no depth info
+    if mask is not None:
+        termination_depth = termination_depth * mask
+    depth_mask = termination_depth > 0
+    
+    expected_depth_loss = (termination_depth - predicted_depth) ** 2
+    expected_depth_loss = expected_depth_loss * depth_mask
+    
+    min_gt_depth = torch.min(termination_depth[depth_mask])
+    
+    # Penalize predicted depth if it is less than the minimum GT depth
+    penalty_loss = torch.where(predicted_depth < min_gt_depth, 
+                               (min_gt_depth - predicted_depth) ** 2, 
+                               torch.zeros_like(predicted_depth))
+    
+    total_loss = expected_depth_loss + penalty_loss
+    
+    return torch.mean(total_loss)
+
+
+def basic_depth_loss(
+    termination_depth: Float[Tensor, "*batch 1"],
+    predicted_depth: Float[Tensor, "*batch 1"],
+    mask: Optional[Bool[Tensor, "*batch 1"]] = None,
+)-> Float[Tensor, "*batch 1"]:
+    # depths are only considered valid if they are greater than 0. 0 depth info means no depth info
+    if mask is not None:
+        termination_depth = termination_depth * mask
+    depth_mask = termination_depth > 0
+    
+    expected_depth_loss = (termination_depth - predicted_depth) ** 2
+    
+    # expected_depth_loss = torch.abs(termination_depth - predicted_depth)
+    
+    expected_depth_loss = expected_depth_loss * depth_mask
+    return torch.mean(expected_depth_loss)
+
+
+def pearson_correlation_depth_loss(
+    termination_depth,
+    predicted_depth,
+    mask=None,
+)-> Float[Tensor, "*batch 1"]:
+    """Pearson correlation depth loss from Few Shot GS
+
+    Returns:
+        loss: Pearson correlation depth loss
+    """
+    termination_depth = termination_depth.reshape(-1, 1)
+    predicted_depth = predicted_depth.reshape(-1, 1)
+    if mask is not None:
+        mask = mask.reshape(-1, 1)
+        predicted_depth = predicted_depth[mask]
+        termination_depth = termination_depth[mask]
+
+    loss = (1 - pearson_corrcoef(predicted_depth, termination_depth))
+    return torch.mean(loss)
+    # patch_size = 300
+    # height, width, _ = termination_depth.shape
+    # loss = 0
+    # num_patches = 0
+
+    # for i in range(0, height, patch_size):
+    #     for j in range(0, width, patch_size):
+    #         termination_patch = termination_depth[i:i+patch_size, j:j+patch_size, :]
+    #         predicted_patch = predicted_depth[ i:i+patch_size, j:j+patch_size, :]
+            
+    #         termination_patch = termination_patch.reshape(-1, 1)
+    #         predicted_patch = predicted_patch.reshape(-1, 1)
+            
+    #         patch_loss = 1 - pearson_corrcoef(predicted_patch, termination_patch)
+    #         loss += torch.mean(patch_loss)
+    #         num_patches += 1
+
+    # return loss / num_patches
 
 def ds_nerf_depth_loss(
     weights: Float[Tensor, "*batch num_samples 1"],
@@ -243,6 +392,75 @@ def ds_nerf_depth_loss(
 
     loss = -torch.log(weights + EPS) * torch.exp(-((steps - termination_depth[:, None]) ** 2) / (2 * sigma)) * lengths
     loss = loss.sum(-2) * depth_mask
+    return torch.mean(loss)
+
+def depth_uncertainty_weighted_loss(
+    weights: Float[Tensor, "*batch num_samples 1"],
+    termination_depth: Float[Tensor, "*batch 1"],
+    predicted_depth: Float[Tensor, "*batch 1"],
+    termination_uncertainty: Float[Tensor, "*batch 1"],
+    predicted_uncertainty: Float[Tensor, "*batch 1"],
+    steps: Float[Tensor, "*batch num_samples 1"],
+    uncertainty_weight: Float[Tensor, "0"] = 1.0
+) -> Float[Tensor, "*batch 1"]:
+    """
+    Depth loss from Visual Tactile Neural Fields
+    Depth loss weighted by corresponding uncertainty
+    Args:
+        weights: Weights predicted for each sample.
+        termination_depth: Ground truth depth of rays.
+        predicted_depth: Depth prediction from the network.
+        termination_uncertainty: Ground truth depth uncertainty of rays.
+        predicted_uncertainty: Depth uncertainty prediction from the network.
+        steps: Sampling distances along rays.
+    Returns:
+        Depth loss scalar.
+        
+    """
+    depth_mask = termination_depth > 0
+    
+    
+    depth_loss = (termination_depth - predicted_depth) ** 2
+    
+    # include uncertainty weighting
+    # uncertainty_weight = 1
+    # uncertainty_weight = 0.75
+    # uncertainty_weight = 0.25
+    
+    uncertainty_component = torch.exp(-uncertainty_weight* termination_uncertainty)
+    
+    expected_depth_loss = depth_loss * uncertainty_component
+    
+    loss = expected_depth_loss * depth_mask
+    
+    return torch.mean(loss)
+
+def dense_depth_priors_loss(
+    termination_depth: Float[Tensor, "*batch 1"],
+    predicted_depth: Float[Tensor, "*batch 1"],
+    termination_uncertainty: Float[Tensor, "*batch 1"],
+    predicted_uncertainty: Float[Tensor, "*batch 1"],
+) -> Float[Tensor, "*batch 1"]:
+    """
+    Depth loss from Dense Depth Priors for Neural Radiance Fields from Sparse Input Views (Roessle et. al. 2022)
+    
+    Args:
+        termination_depth: Ground truth depth of rays.
+        predicted_depth: Depth prediction from the network.
+        termination_uncertainty: Ground truth depth uncertainty of rays.
+        predicted_uncertainty: Depth uncertainty prediction from the network.
+    """
+    depth_mask = termination_depth > 0
+    
+    p_condition = torch.abs(termination_depth - predicted_depth) > termination_uncertainty
+    q_condition = predicted_uncertainty > termination_uncertainty
+    
+    should_compute_loss_mask = torch.logical_or(p_condition, q_condition)
+    loss = torch.log(predicted_uncertainty ** 2 + EPS) + ((predicted_depth - termination_depth) ** 2) / (predicted_uncertainty ** 2 + EPS)
+    
+    loss = loss * should_compute_loss_mask
+    loss = loss * depth_mask
+    
     return torch.mean(loss)
 
 
@@ -294,6 +512,9 @@ def depth_loss(
     directions_norm: Float[Tensor, "*batch 1"],
     is_euclidean: bool,
     depth_loss_type: DepthLossType,
+    termination_uncertainty: Float[Tensor, "*batch 1"] = None,
+    predicted_uncertainty: Float[Tensor, "*batch 1"] = None,
+    uncertainty_weight: Float[Tensor, "0"] = 1.0
 ) -> Float[Tensor, "0"]:
     """Implementation of depth losses.
 
@@ -320,6 +541,17 @@ def depth_loss(
 
     if depth_loss_type == DepthLossType.URF:
         return urban_radiance_field_depth_loss(weights, termination_depth, predicted_depth, steps, sigma)
+    
+    if depth_loss_type == DepthLossType.SIMPLE_LOSS:
+        return basic_depth_loss(termination_depth, predicted_depth) 
+    
+    if depth_loss_type == DepthLossType.DENSE_DEPTH_PRIORS_LOSS and termination_uncertainty is not None and predicted_uncertainty is not None:
+        return dense_depth_priors_loss(termination_depth, predicted_depth, termination_uncertainty, predicted_uncertainty)
+
+    if depth_loss_type == DepthLossType.DEPTH_UNCERTAINTY_WEIGHTED_LOSS and termination_uncertainty is not None and predicted_uncertainty is not None:
+        return depth_uncertainty_weighted_loss(weights, termination_depth, predicted_depth, termination_uncertainty, predicted_uncertainty, steps, uncertainty_weight=uncertainty_weight)
+    
+    
 
     raise NotImplementedError("Provided depth loss type not implemented.")
 

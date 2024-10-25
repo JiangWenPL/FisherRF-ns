@@ -105,8 +105,9 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         if test_mode == "inference":
             self.dataparser.downscale_factor = 1  # Avoid opening images
         self.includes_time = self.dataparser.includes_time
-
+        
         self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train")
+        
         self.train_dataset = self.create_train_dataset()
         self.eval_dataset = self.create_eval_dataset()
         if len(self.train_dataset) > 500 and self.config.cache_images == "gpu":
@@ -124,10 +125,32 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
 
         # Some logic to make sure we sample every camera in equal amounts
         self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
+        self.train_all_cameras = [i for i in range(len(self.train_dataset))]
+        
+        self.train_unseen_cameras_subset = deepcopy(self.train_unseen_cameras)
+        # this is manually selected for now
+        # bunny blender
+        self.train_unseen_cameras_subset = [0, 5, 10, 15]
+        
+        # bunny real
+        # self.train_unseen_cameras_subset = [0, 8, 16, 23]
+        # self.train_unseen_cameras_subset = [1, 4, 8, 12]
+        
+        # mirror
+        # self.train_unseen_cameras_subset = [1, 5, 10, 20, 30, 35, 40, 50, 60, 70, 75]
+        
+        # self.train_unseen_cameras_subset = [i for i in range(len(self.train_dataset))]
+        
+        
+        self.original_subset = deepcopy(self.train_unseen_cameras_subset)
+        
+        # self.original_subset = deepcopy(self.train_unseen_cameras_subset)
+        
         self.eval_unseen_cameras = [i for i in range(len(self.eval_dataset))]
         assert len(self.train_unseen_cameras) > 0, "No data found in dataset"
 
         super().__init__()
+
 
     def cache_images(self, cache_images_option):
         cached_train = []
@@ -302,10 +325,26 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         # TODO: fix this to be the resolution of the last image rendered
         return 800 * 800
 
+    def get_cam_data_from_idx(self, idx: int) -> Tuple[Cameras, Dict]:
+        """Get the camera and data from the index"""
+        data = deepcopy(self.cached_train[idx])
+        data["image"] = data["image"].to(self.device)
+
+        assert len(self.train_dataset.cameras.shape) == 1, "Assumes single batch dimension"
+        camera = self.train_dataset.cameras[idx : idx + 1].to(self.device)
+        if camera.metadata is None:
+            camera.metadata = {}
+            
+        camera.metadata["cam_idx"] = idx
+        return camera, data
+
     def next_train(self, step: int) -> Tuple[Cameras, Dict]:
         """Returns the next training batch
+        
+        In the case of GS, takes one camera and image pair.
 
         Returns a Camera instead of raybundle"""
+
         image_idx = self.train_unseen_cameras.pop(random.randint(0, len(self.train_unseen_cameras) - 1))
         # Make sure to re-populate the unseen cameras list if we have exhausted it
         if len(self.train_unseen_cameras) == 0:
@@ -320,7 +359,76 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             camera.metadata = {}
         camera.metadata["cam_idx"] = image_idx
         return camera, data
+    
+    def next_train_subset(self, step: int) -> Tuple[Cameras, Dict]:
+        """Returns the next training batch
 
+        Returns a Camera instead of raybundle"""
+        image_idx = self.train_unseen_cameras_subset.pop(random.randint(0, len(self.train_unseen_cameras_subset) - 1))
+        # Make sure to re-populate the unseen cameras list if we have exhausted it
+        if len(self.train_unseen_cameras_subset) == 0:
+            self.train_unseen_cameras_subset = deepcopy(self.original_subset)
+        data = deepcopy(self.cached_train[image_idx])
+        data["image"] = data["image"].to(self.device)
+
+        assert len(self.train_dataset.cameras.shape) == 1, "Assumes single batch dimension"
+        camera = self.train_dataset.cameras[image_idx : image_idx + 1].to(self.device)
+        if camera.metadata is None:
+            camera.metadata = {}
+        camera.metadata["cam_idx"] = image_idx
+        return camera, data
+    
+    
+    def get_train_views_not_in_subset(self):
+        """Get the views not in the subset"""
+        
+        difference = list(set(self.train_unseen_cameras) - set(self.original_subset))
+        return difference
+    
+    def get_current_views(self):
+        """Get the current views"""
+        return self.train_all_cameras
+    
+    def add_new_view(self, idx: int) -> None:
+        """ Adds a new view to the training set. Simply relooks at the transforms.json and adds the new view"""
+        print("New pose added")
+        import time; time.sleep(2)
+        
+        kwargs = {"add_view": True}
+        self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train", **kwargs)
+        
+        self.train_dataset = self.create_train_dataset()
+        self.eval_dataset = self.create_eval_dataset()
+        self.cached_train, self.cached_eval = self.cache_images(self.config.cache_images)
+        
+        print("Length of new train dataset: ", len(self.train_dataset))
+        print("Length of new eval dataset: ", len(self.eval_dataset))
+        
+        self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
+        self.train_all_cameras = [i for i in range(len(self.train_dataset))]
+        self.original_subset = deepcopy(self.train_unseen_cameras)
+    
+    
+    def add_new_touch(self) -> None:
+        """ Adds a new view to the training set. Simply relooks at the transforms.json and adds the new view"""
+        print("New touch added")
+        import time; time.sleep(2)
+        
+        kwargs = {"add_view": True}
+        self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train", **kwargs)
+        
+        self.train_dataset = self.create_train_dataset()
+        self.eval_dataset = self.create_eval_dataset()
+        self.cached_train, self.cached_eval = self.cache_images(self.config.cache_images)
+        
+        print("Length of new train dataset: ", len(self.train_dataset))
+        print("Length of new eval dataset: ", len(self.eval_dataset))
+        
+        self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
+        self.train_all_cameras = [i for i in range(len(self.train_dataset))]
+        self.original_subset = deepcopy(self.train_unseen_cameras)
+        
+        
     def next_eval(self, step: int) -> Tuple[Cameras, Dict]:
         """Returns the next evaluation batch
 
@@ -380,6 +488,8 @@ def _undistort_image(
         image = image[y : y + h, x : x + w]
         if "depth_image" in data:
             data["depth_image"] = data["depth_image"][y : y + h, x : x + w]
+        if "normals_image" in data:
+            data["normals_image"] = data["normals_image"][y : y + h, x : x + w]
         if "mask" in data:
             mask = data["mask"].numpy()
             mask = mask.astype(np.uint8) * 255
