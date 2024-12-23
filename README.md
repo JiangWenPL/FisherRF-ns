@@ -1,6 +1,9 @@
 # FisherRF + Nerfstudio
 
+We provide the official implementation of FisherRF for Nerfstudio.
+
 - 🆕! Our touch code is at https://github.com/JiangWenPL/FisherRF-ns/tree/dev/mattstrong/offline-experiments. We will provide some steps on how to run it soon.
+- 🆕 We will show how to run FisherRF-ns on a real-time _and_ offline system. Stay tuned! 
 
 
 <p align="center">
