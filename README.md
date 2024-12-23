@@ -1,3 +1,8 @@
+# FisherRF + Nerfstudio
+
+- 🆕! Our touch code is at https://github.com/JiangWenPL/FisherRF-ns/tree/dev/mattstrong/offline-experiments. We will provide some steps on how to run it soon.
+
+
 <p align="center">
     <!-- community badges -->
     <a href="https://discord.gg/uMbNqcraFc"><img src="https://dcbadge.vercel.app/api/server/uMbNqcraFc?style=plastic"/></a>
